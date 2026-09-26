@@ -1,0 +1,16 @@
+# Raw Kaggle data (download separately; see README)
+homecredit-eda/data/
+*.csv
+
+# Model objects and large intermediate files
+*.rds
+*.RData
+*.pkl
+*.parquet
+*.feather
+
+# R / Quarto artifacts
+.Rhistory
+.Rproj.user/
+*_files/
+.quarto/
