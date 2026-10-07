@@ -10,7 +10,8 @@ Many people struggle to get loans because they have little or no credit history.
 |---|---|
 | [homecredit-eda/eda.qmd](homecredit-eda/eda.qmd) | Exploratory data analysis notebook (rendered: [eda.html](homecredit-eda/eda.html)) |
 | [data_preparation.R](data_preparation.R) | Data preparation script: cleaning, feature engineering, bureau aggregation, train/test consistency |
-| [.gitignore](.gitignore) | Keeps raw data, prepared data, and model objects out of the repository |
+| [homecredit-eda/modeling.qmd](homecredit-eda/modeling.qmd) | Modeling notebook: benchmark, model comparison, imbalance experiment, tuning, holdout evaluation, Kaggle submission (rendered: [modeling.html](homecredit-eda/modeling.html)) |
+| [.gitignore](.gitignore) | Keeps raw data, prepared data, model objects (`models/`), and submissions (`submissions/`) out of the repository |
 
 ## Getting the data
 
@@ -101,7 +102,7 @@ The 122 raw application columns become 167 features. Seven raw columns are remov
 | Redundancy among the 47 building columns (AVG/MODE/MEDI triplets) | The EDA flagged this as untested. Removing columns is a feature-selection decision, so it is left to modeling, where a correlation check or regularization can make it. |
 | Two-model approach (with and without external scores) | This is a modeling decision, not a preparation step. The script supports it: `drop_external_scores()` returns the restricted feature set (168 → 158 columns in test). |
 | Age as a protected characteristic | Age is kept, because removing it is a policy call for the fairness review the EDA recommends. `age_years` and `age_band` are easy to drop there. |
-| Class imbalance (8.1% positive) | Handled at modeling time with class weights or threshold tuning, not by changing the data. |
+| Class imbalance (8.1% positive) | A modeling decision, not a preparation step. Weighting and downsampling were tested in the modeling notebook (see [Modeling](#modeling)). |
 | `bureau_balance`, `previous_application`, `POS_CASH_balance`, `installments_payments`, `credit_card_balance` | Not explored in the EDA, so there were no recorded decisions to implement. They are the natural next source of features. |
 | `FLAG_WORK_PHONE` / `FLAG_PHONE` duplicate dictionary descriptions | Kept as-is. The data is valid; only the documentation is ambiguous. |
 
@@ -145,3 +146,70 @@ As a sanity check, the prepared training data reproduces the EDA's rates. No-bur
 ### Use of AI
 
 I wrote the script with Claude, using the decision table at the end of my EDA notebook as the specification. I checked the script by running it on the full data and confirming three things: every consistency check passed, the learned income cap matched the 99th percentile reported in the EDA, and the prepared data reproduced the EDA's default rates (above). Choices that required judgment were mine, drawing on EDA findings: folding XNA gender into the majority level rather than keeping a 4-row "Other," setting counts to 0 but ratios to the median for applicants with no bureau record, and de-duplicating the building-column missing flags.
+
+---
+
+## Modeling
+
+[`homecredit-eda/modeling.qmd`](homecredit-eda/modeling.qmd) ([rendered](homecredit-eda/modeling.html)) builds a model that predicts each applicant's probability of payment difficulty (`TARGET = 1`). The aim is to **rank** applicants by risk, so ROC AUC is the primary metric throughout. Only 8.07% of applicants default, so a majority-class benchmark reaches 91.93% accuracy with an AUC of only 0.50.
+
+### Approach
+
+1. **Internal holdout.** The labeled data were split once into 80% development data and a 20% holdout, stratified on `TARGET`. The holdout was not touched until the final model had been chosen.
+2. **Candidate models.** Ridge logistic regression, random forest, and XGBoost were compared on one stratified 50,001-row development sample, using identical stratified 3-fold CV folds and ROC AUC.
+3. **Class imbalance.** XGBoost was compared with no adjustment, positive-class weighting, and random downsampling, with sampling applied inside each training fold only.
+4. **Tuning.** A randomized search scored 20 XGBoost configurations with stratified 3-fold CV on a 5,000-row development sample.
+5. **Final evaluation.** The selected model was fit on all development data and evaluated once on the holdout.
+6. **Kaggle submission.** The model was then refit on all 307,511 labeled rows to predict the Kaggle test set.
+
+### Results
+
+| Model / experiment | ROC AUC | Evaluated on |
+|---|---|---|
+| Majority-class baseline | 0.5000 | Training data |
+| Ridge logistic regression | 0.7473 | 3-fold CV, exploration sample |
+| Random forest | 0.7262 | 3-fold CV, exploration sample |
+| XGBoost (initial, unadjusted) | **0.7575** | 3-fold CV, exploration sample |
+| XGBoost, positive-class weighting | 0.7514 | 3-fold CV, exploration sample |
+| XGBoost, random downsampling | 0.7495 | 3-fold CV, exploration sample |
+| Final XGBoost: untouched holdout | **0.7556** | 61,502 holdout applicants |
+| Final XGBoost: Kaggle public | **0.75749** | Kaggle test set (public portion) |
+| Final XGBoost: Kaggle private | **0.75276** | Kaggle test set (private portion) |
+
+These numbers come from different evaluation datasets, not one identical experiment:
+- The first six rows are mean cross-validated AUCs on the same 50,001-row development sample and folds, so they can be compared with each other.
+- The holdout AUC comes from a model trained on all development data and scored on unseen labeled applicants.
+- The Kaggle scores come from the same specification refit on all labeled data. They were obtained as a late submission after the competition closed.
+
+### Model choice
+
+**XGBoost was selected** for three reasons. It had the highest cross-validated AUC of the three candidate models, it led in every fold, and it was the fastest to fit.
+- **Imbalance.** Weighting and downsampling raised sensitivity at a 0.50 threshold but lowered AUC, so the unadjusted model was kept.
+- **Tuning.** The randomized search chose shallow, slowly learning, regularized trees: `nrounds = 300`, `max_depth = 2`, `eta = 0.047`, `gamma = 4`, `colsample_bytree = 0.95`, `min_child_weight = 10`, `subsample = 0.86`. The best tuning-sample CV AUC (0.7085) comes from a much smaller sample and is not comparable with the other rows.
+- **Overfitting.** In-sample AUC was 0.7639 against 0.7556 on the holdout, a gap of 0.0083. Together with Kaggle scores close to the holdout estimate, this shows limited evidence of overfitting.
+
+### Findings
+
+- **Uses.** The model ranks applicants by estimated risk well above chance. It could help prioritize applications for review, focus underwriting resources, and flag applicants for extra verification. It should support lending decisions, not make them automatically.
+- **Drivers.** External-score features dominate the model's predictions. Loan structure, bureau history, and employment stability also contribute. These are predictive associations, not causes.
+- **Fairness.** Age and gender are among the influential predictors, so a fairness review and a legal and compliance review would be needed before any real use.
+
+### Limitations
+
+- **Possible optimism.** Some feature choices and missing-value flags used `TARGET` on the full training data, holdout rows included, before CV. CV and holdout estimates may therefore be slightly optimistic. The Kaggle scores, whose outcomes were never used, suggest the effect is small.
+- **Unused tables.** Only `bureau` was used among the supplementary tables.
+- **Noisy tuning.** The tuning sample had only 404 defaults.
+- **No decision analysis.** No decision threshold or cost-benefit analysis was done.
+
+### How to run
+
+The prepared files from `data_preparation.R` must exist first. Then render the notebook from `homecredit-eda/`:
+
+```
+quarto render modeling.qmd
+```
+
+- **Packages:** `tidyverse`, `caret`, `glmnet`, `randomForest`, `xgboost` (3.x), `pROC`, and `doParallel`.
+- **Compatibility fix:** caret 7.0.1's built-in `xgbTree` method is incompatible with xgboost 3.x, so the notebook defines a small compatible copy of it.
+- **Runtime:** a full render refits every model and takes roughly 10 minutes.
+- **Outputs:** it writes the final model to `models/final_home_credit_xgb.rds` and the submission to `submissions/home_credit_xgboost_submission.csv`. Both folders are git-ignored.

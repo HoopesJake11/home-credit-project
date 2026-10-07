@@ -3,6 +3,8 @@ homecredit-eda/data/
 *.csv
 
 # Model objects and large intermediate files
+models/
+submissions/
 *.rds
 *.RData
 *.pkl
