@@ -1,0 +1,168 @@
+---
+title: "Business Impact: Results for the Presentation"
+author: "Jake Hoopes"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+source("presentation_setup.R")
+```
+
+This notebook turns the final model's holdout predictions into the numbers on the
+Business Impact slide. It uses the 61,502 holdout applicants the model never saw
+in training, so nothing here is in-sample. It follows the success definition in
+the business problem statement: a lower default rate at the same approval rate,
+or a higher approval rate at the same default rate.
+
+```{r basics}
+ho <- tibble(
+  default    = as.integer(holdout_data$TARGET == 1),
+  prob       = holdout_prob,
+  credit     = holdout_data$AMT_CREDIT,
+  has_bureau = holdout_data$has_bureau_record
+)
+n_ho      <- nrow(ho)
+base_rate <- mean(ho$default)
+per_10k   <- 10000 / n_ho
+
+tibble(Item  = c("Holdout applicants", "Defaults", "Default rate", "Holdout AUC"),
+       Value = c(num(n_ho), num(sum(ho$default)), pct(base_rate, 2),
+                 sprintf("%.4f", check_auc))) |>
+  knitr::kable()
+```
+
+## 1. Default rate by model risk decile
+
+```{r deciles}
+ho <- ho |> mutate(decile = ntile(prob, 10))   # 10 = riskiest
+
+deciles <- ho |>
+  group_by(decile) |>
+  summarise(applicants   = n(),
+            avg_score    = mean(prob),
+            default_rate = mean(default),
+            defaults     = sum(default),
+            .groups = "drop") |>
+  arrange(desc(decile)) |>
+  mutate(share_of_defaults = defaults / sum(defaults),
+         cumulative_share  = cumsum(share_of_defaults))
+
+deciles |>
+  mutate(across(c(avg_score, default_rate, share_of_defaults, cumulative_share),
+                ~ pct(.x))) |>
+  knitr::kable(caption = "Holdout applicants by model risk decile (10 = riskiest)")
+
+write_csv(deciles, file.path(results_dir, "deciles.csv"))
+```
+
+```{r decile-chart, fig.width = 9, fig.height = 5}
+decile_plot <- ggplot(deciles, aes(factor(decile), default_rate,
+                                   fill = decile %in% c(1, 10))) +
+  geom_col() +
+  geom_text(aes(label = pct(default_rate)), vjust = -0.4, size = 6) +
+  scale_fill_manual(values = c(`TRUE` = "#CC0000", `FALSE` = "#A9B4D0"), guide = "none") +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "The riskiest tenth of applicants default far more than the safest",
+       x = "Model risk decile (10 = riskiest)", y = "Default rate") +
+  theme_minimal(base_size = 18)
+decile_plot
+ggsave(file.path(results_dir, "decile_chart.png"), decile_plot, width = 11, height = 6, dpi = 200)
+```
+
+## 2. Flagging the riskiest applicants
+
+```{r policies}
+flag_policy <- function(q) {
+  cutoff <- quantile(ho$prob, 1 - q)
+  flag   <- ho$prob >= cutoff
+  tibble(
+    flagged_share         = mean(flag),
+    defaults_caught       = sum(flag & ho$default == 1) / sum(ho$default),
+    default_rate_flagged  = mean(ho$default[flag]),
+    default_rate_approved = mean(ho$default[!flag]),
+    relative_drop         = 1 - mean(ho$default[!flag]) / base_rate,
+    good_borrowers_flagged = sum(flag & ho$default == 0) / sum(ho$default == 0),
+    defaults_avoided_per_10k = sum(flag & ho$default == 1) * per_10k,
+    defaulted_credit_avoided_per_10k = sum(ho$credit[flag & ho$default == 1]) * per_10k,
+    score_cutoff          = cutoff
+  )
+}
+policies <- map_dfr(c(0.05, 0.10, 0.15, 0.20), flag_policy)
+
+policies |>
+  mutate(across(c(flagged_share:good_borrowers_flagged), ~ pct(.x)),
+         across(c(defaults_avoided_per_10k, defaulted_credit_avoided_per_10k), num),
+         score_cutoff = round(score_cutoff, 3)) |>
+  knitr::kable(caption = "Flagging the riskiest X% of applicants")
+
+write_csv(policies, file.path(results_dir, "policies.csv"))
+```
+
+## 3. Same approval rate: the model vs. "no credit history, no loan"
+
+A traditional lender turns away anyone without a credit bureau record. This
+compares that rule with the model turning away the same number of applicants.
+
+```{r rule-vs-model}
+rule_decline  <- ho$has_bureau == 0
+k             <- sum(rule_decline)
+model_decline <- rank(-ho$prob, ties.method = "first") <= k
+
+same_approval <- tibble(
+  Policy = c("No credit history, no loan", "My model"),
+  `Approval rate` = pct(c(1 - k / n_ho, 1 - k / n_ho)),
+  `Default rate of approved loans` = pct(c(mean(ho$default[!rule_decline]),
+                                           mean(ho$default[!model_decline])), 2),
+  `Defaults per 10,000 applicants` = num(c(sum(ho$default[!rule_decline]),
+                                           sum(ho$default[!model_decline])) * per_10k),
+  `Thin-file applicants approved` = pct(c(0, mean(!model_decline[ho$has_bureau == 0])))
+)
+knitr::kable(same_approval)
+
+# Same default rate as the rule: how many applicants can the model approve?
+rule_rate  <- mean(ho$default[!rule_decline])
+safe_first <- ho$default[order(ho$prob)]
+approve_n  <- max(which(cumsum(safe_first) / seq_len(n_ho) <= rule_rate))
+same_default <- tibble(
+  `Default rate held at` = pct(rule_rate, 2),
+  `Rule approves`  = pct(1 - k / n_ho),
+  `Model approves` = pct(approve_n / n_ho),
+  `Extra approvals per 10,000 applicants` = num((approve_n - (n_ho - k)) * per_10k)
+)
+knitr::kable(same_default)
+
+write_csv(same_approval, file.path(results_dir, "same_approval.csv"))
+write_csv(same_default,  file.path(results_dir, "same_default.csv"))
+```
+
+## 4. Summary for the slides
+
+```{r summary}
+p10 <- policies |> filter(abs(flagged_share - 0.10) < 0.005)
+fewer <- (sum(ho$default[!rule_decline]) - sum(ho$default[!model_decline])) * per_10k
+
+summary_lines <- c(
+  sprintf("# Business impact results (holdout, %s applicants)", num(n_ho)),
+  "",
+  sprintf("- Holdout AUC check: %.4f", check_auc),
+  sprintf("- Riskiest decile default rate: %s; safest decile: %s",
+          pct(deciles$default_rate[deciles$decile == 10]),
+          pct(deciles$default_rate[deciles$decile == 1])),
+  sprintf("- Flag riskiest 10%%: catches %s of defaults; approved default rate %s -> %s (%s lower)",
+          pct(p10$defaults_caught), pct(base_rate, 2),
+          pct(p10$default_rate_approved, 2), pct(p10$relative_drop)),
+  sprintf("- Same approval rate as 'no credit history, no loan' (%s approved): default rate %s (rule) vs %s (model); %s fewer defaults per 10,000 applicants",
+          pct(1 - k / n_ho), pct(rule_rate, 2),
+          pct(mean(ho$default[!model_decline]), 2), num(fewer)),
+  sprintf("- Thin-file applicants the model approves at that rate: %s",
+          pct(mean(!model_decline[ho$has_bureau == 0]))),
+  sprintf("- Same default rate as the rule (%s): model approves %s vs %s (%s more per 10,000 applicants)",
+          pct(rule_rate, 2), pct(approve_n / n_ho), pct(1 - k / n_ho),
+          num((approve_n - (n_ho - k)) * per_10k))
+)
+writeLines(summary_lines, file.path(results_dir, "business_impact_summary.md"))
+cat(summary_lines, sep = "\n")
+```

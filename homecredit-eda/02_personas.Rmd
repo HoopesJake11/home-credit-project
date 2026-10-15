@@ -1,0 +1,180 @@
+---
+title: "Personas: One Approved, One Denied"
+author: "Jake Hoopes"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+source("presentation_setup.R")
+```
+
+The two personas on the slides are based on real, anonymized holdout applicants,
+scored by the final model. The names are made up. Each applicant's prediction is
+split into contributions (SHAP values) that show which parts of the application
+pushed the risk up or down.
+
+**Decision rule used for the personas:** the riskiest 10% of applicants by model
+score are denied; everyone else is approved. Change `deny_share` to try another rule.
+
+```{r rule}
+deny_share <- 0.10
+cutoff <- quantile(holdout_prob, 1 - deny_share)
+
+ho <- holdout_data |>
+  mutate(row_id = row_number(),
+         prob = holdout_prob,
+         risk_percentile = percent_rank(prob),
+         decision = if_else(prob >= cutoff, "Deny", "Approve"))
+
+tibble(`Deny if predicted risk is at least` = pct(cutoff),
+       `Average predicted risk` = pct(mean(ho$prob))) |>
+  knitr::kable()
+```
+
+## Candidate applicants
+
+**Approved candidate:** no credit bureau record (the borrower a traditional bank turns
+away), repaid, in the safest half of applicants, has at least two outside scores, aged
+22 to 35, currently employed.
+
+**Denied candidate:** in the riskiest 10%, actually had payment difficulties, aged 22
+to 45, and does have a credit bureau record (so the denial is not about missing history).
+
+```{r candidates}
+profile_cols <- c("row_id", "prob", "risk_percentile", "TARGET", "age_years",
+                  "CODE_GENDER", "years_employed", "NAME_INCOME_TYPE",
+                  "OCCUPATION_TYPE", "NAME_EDUCATION_TYPE", "NAME_FAMILY_STATUS",
+                  "CNT_CHILDREN", "NAME_HOUSING_TYPE", "AMT_INCOME_TOTAL",
+                  "AMT_CREDIT", "AMT_GOODS_PRICE", "AMT_ANNUITY", "ltv",
+                  "ext_source_mean", "ext_source_count", "has_bureau_record",
+                  "bureau_credits", "fields_missing", "NAME_CONTRACT_TYPE")
+
+approved_candidates <- ho |>
+  filter(has_bureau_record == 0, TARGET == 0, risk_percentile <= 0.5,
+         ext_source_count >= 2, between(age_years, 22, 35),
+         not_currently_employed == 0, OCCUPATION_TYPE != "Missing") |>
+  arrange(prob) |>
+  slice(seq(1, n(), length.out = min(5, n())) |> round())   # spread across the group
+
+denied_candidates <- ho |>
+  filter(decision == "Deny", TARGET == 1, between(age_years, 22, 45),
+         has_bureau_record == 1, OCCUPATION_TYPE != "Missing") |>
+  arrange(desc(prob)) |>
+  slice(seq(1, n(), length.out = min(5, n())) |> round())
+
+approved_candidates |> select(any_of(profile_cols)) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  knitr::kable(caption = "Approved candidates")
+denied_candidates |> select(any_of(profile_cols)) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  knitr::kable(caption = "Denied candidates")
+```
+
+Pick one of each. The defaults take the first row of each table; change the numbers
+to use a different candidate.
+
+```{r pick}
+approved_pick <- 3
+denied_pick   <- 1
+
+personas <- bind_rows(
+  approved_candidates |> slice(approved_pick) |> mutate(persona = "Approved"),
+  denied_candidates   |> slice(denied_pick)   |> mutate(persona = "Denied")
+)
+```
+
+## Why the model decided what it did
+
+```{r explain}
+ex <- explain_applicants(final_internal_xgb, personas)
+stopifnot(max(abs(ex$prob - personas$prob)) < 1e-4)  # contributions add up to the score
+
+contrib <- ex$long |>
+  mutate(persona = personas$persona[row], theme = theme_of(variable))
+
+by_theme <- contrib |>
+  group_by(persona, theme) |>
+  summarise(contribution = sum(contribution), .groups = "drop") |>
+  filter(abs(contribution) > 0.005) |>
+  arrange(persona, desc(abs(contribution)))
+
+by_feature <- contrib |>
+  filter(contribution != 0) |>
+  group_by(persona) |>
+  slice_max(abs(contribution), n = 8) |>
+  ungroup() |>
+  mutate(direction = if_else(contribution > 0, "raises risk", "lowers risk"))
+
+by_theme |>
+  mutate(direction = if_else(contribution > 0, "raises risk", "lowers risk"),
+         contribution = round(contribution, 3)) |>
+  knitr::kable(caption = "Contribution by theme (log-odds; positive = riskier)")
+by_feature |>
+  select(persona, column, value, contribution, direction) |>
+  mutate(across(c(value, contribution), ~ round(.x, 3))) |>
+  knitr::kable(caption = "Top 8 individual drivers per persona")
+
+write_csv(by_theme,   file.path(results_dir, "persona_drivers_by_theme.csv"))
+write_csv(by_feature, file.path(results_dir, "persona_drivers_by_feature.csv"))
+```
+
+```{r persona-charts, fig.width = 10, fig.height = 5}
+for (p in c("Approved", "Denied")) {
+  d <- by_theme |> filter(persona == p) |> slice_max(abs(contribution), n = 7)
+  g <- ggplot(d, aes(contribution, fct_reorder(theme, abs(contribution)),
+                     fill = contribution > 0)) +
+    geom_col() +
+    geom_vline(xintercept = 0, colour = "grey40") +
+    scale_fill_manual(values = c(`TRUE` = "#CC0000", `FALSE` = "#1E2761"),
+                      labels = c(`TRUE` = "Raises risk", `FALSE` = "Lowers risk"), name = NULL) +
+    labs(title = paste0(p, " persona: what moved the score"),
+         x = "Contribution to predicted risk (log-odds)", y = NULL) +
+    theme_minimal(base_size = 18) + theme(legend.position = "top")
+  print(g)
+  ggsave(file.path(results_dir, paste0("persona_", tolower(p), "_drivers.png")),
+         g, width = 11, height = 6, dpi = 200)
+}
+```
+
+## Summary for the slides
+
+```{r summary}
+avg_risk <- mean(ho$prob)
+fmt_profile <- function(r) {
+  c(sprintf("- Predicted risk: %s (average applicant %s); riskier than %s of applicants; decision: %s",
+            pct(r$prob), pct(avg_risk), pct(r$risk_percentile), r$decision),
+    sprintf("- Actual outcome: %s", if_else(r$TARGET == 1, "had payment difficulties", "repaid")),
+    sprintf("- Age %d, %s, %s; employed %s years; %s",
+            round(r$age_years), r$CODE_GENDER, r$NAME_FAMILY_STATUS,
+            round(r$years_employed, 1), r$NAME_INCOME_TYPE),
+    sprintf("- Occupation: %s; education: %s; housing: %s; children: %s",
+            r$OCCUPATION_TYPE, r$NAME_EDUCATION_TYPE, r$NAME_HOUSING_TYPE, r$CNT_CHILDREN),
+    sprintf("- Loan %s (%s) for goods priced %s, loan-to-value %.2f; income %s",
+            num(r$AMT_CREDIT), r$NAME_CONTRACT_TYPE, num(r$AMT_GOODS_PRICE), r$ltv,
+            num(r$AMT_INCOME_TOTAL)),
+    sprintf("- Outside score average %.2f from %d score(s); credit bureau record: %s; blank fields: %d",
+            r$ext_source_mean, as.integer(r$ext_source_count),
+            if_else(r$has_bureau_record == 1, "yes", "no"), as.integer(r$fields_missing)))
+}
+lines <- c("# Persona results", "",
+           sprintf("Rule: deny the riskiest %s (predicted risk at least %s).",
+                   pct(deny_share, 0), pct(cutoff)), "")
+for (i in seq_len(nrow(personas))) {
+  r <- personas[i, ]
+  th <- by_theme |> filter(persona == r$persona)
+  lower <- th |> filter(contribution < 0) |> head(3)
+  raise <- th |> filter(contribution > 0) |> head(3)
+  lines <- c(lines, paste0("## ", r$persona, " persona (holdout row ", r$row_id, ")"),
+             fmt_profile(r),
+             "- Biggest factors lowering risk:",
+             paste0("  - ", lower$theme, " (", round(lower$contribution, 2), ")"),
+             "- Biggest factors raising risk:",
+             paste0("  - ", raise$theme, " (", round(raise$contribution, 2), ")"),
+             "")
+}
+writeLines(lines, file.path(results_dir, "persona_summary.md"))
+cat(lines, sep = "\n")
+```
