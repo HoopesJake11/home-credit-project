@@ -11,6 +11,10 @@ Many people struggle to get loans because they have little or no credit history.
 | [homecredit-eda/eda.qmd](homecredit-eda/eda.qmd) | Exploratory data analysis notebook (rendered: [eda.html](homecredit-eda/eda.html)) |
 | [data_preparation.R](data_preparation.R) | Data preparation script: cleaning, feature engineering, bureau aggregation, train/test consistency |
 | [homecredit-eda/modeling.qmd](homecredit-eda/modeling.qmd) | Modeling notebook: benchmark, model comparison, imbalance experiment, tuning, holdout evaluation, Kaggle submission (rendered: [modeling.html](homecredit-eda/modeling.html)) |
+| [homecredit-eda/01_business_impact.Rmd](homecredit-eda/01_business_impact.Rmd) | Presentation notebook: what the model's holdout predictions mean for approvals and defaults (rendered: [01_business_impact.html](homecredit-eda/01_business_impact.html)) |
+| [homecredit-eda/02_personas.Rmd](homecredit-eda/02_personas.Rmd) | Presentation notebook: one approved and one denied applicant, with the drivers behind each score (rendered: [02_personas.html](homecredit-eda/02_personas.html)) |
+| [homecredit-eda/presentation_setup.R](homecredit-eda/presentation_setup.R), [rebuild_presentation_cache.R](homecredit-eda/rebuild_presentation_cache.R) | Shared setup for the presentation notebooks, and the script that builds the final model they use |
+| [homecredit-eda/presentation_results/](homecredit-eda/presentation_results/) | Summaries and charts for the slides; [FOR_DECK.md](homecredit-eda/presentation_results/FOR_DECK.md) collects everything in one file |
 | [.gitignore](.gitignore) | Keeps raw data, prepared data, model objects (`models/`), and submissions (`submissions/`) out of the repository |
 
 ## Getting the data
@@ -213,3 +217,50 @@ quarto render modeling.qmd
 - **Compatibility fix:** caret 7.0.1's built-in `xgbTree` method is incompatible with xgboost 3.x, so the notebook defines a small compatible copy of it.
 - **Runtime:** a full render refits every model and takes roughly 10 minutes.
 - **Outputs:** it writes the final model to `models/final_home_credit_xgb.rds` and the submission to `submissions/home_credit_xgboost_submission.csv`. Both folders are git-ignored.
+
+---
+
+## Presentation
+
+Two notebooks turn the final model into the numbers and examples on the slides. Both use only the 61,502 holdout applicants the model never saw in training, so nothing is in-sample. [`presentation_results/FOR_DECK.md`](homecredit-eda/presentation_results/FOR_DECK.md) collects the results in one file.
+
+### Business impact
+
+[`01_business_impact.Rmd`](homecredit-eda/01_business_impact.Rmd) follows the success definition in the business problem statement: a lower default rate at the same approval rate, or a higher approval rate at the same default rate. It compares the model with a common rule, "no credit history, no loan," which turns away every applicant without a credit bureau record.
+
+| Result | Value |
+|---|---|
+| Default rate, riskiest vs. safest tenth of applicants | 27.2% vs. 1.6% |
+| Flag the riskiest 10% | Catches 33.7% of defaults; the default rate of approved loans falls from 8.07% to 5.95% |
+| **Same approval rate as the rule** (85.7% approved) | Default rate 7.77% (rule) vs. 5.43% (model): **200 fewer defaults per 10,000 applicants** |
+| Applicants with no credit history approved at that rate | 80.1% (the rule approves none) |
+| **Same default rate as the rule** (7.77%) | Model approves 99.3% vs. 85.7%: **1,367 more approvals per 10,000 applicants** |
+
+### Personas
+
+[`02_personas.Rmd`](homecredit-eda/02_personas.Rmd) picks one approved and one denied holdout applicant and splits each prediction into SHAP contributions, which show which parts of the application pushed the predicted risk up or down. The decision rule denies the riskiest 10% of applicants (predicted risk of at least 17.9%).
+
+| Persona | Holdout row | Predicted risk | Outcome | Main drivers |
+|---|---|---|---|---|
+| Approved | 46906 | 3.6% | Repaid | No credit bureau record, but strong outside credit scores, a university education, and a loan equal to the price of the goods |
+| Denied | 22892 | 60.7% | Had payment difficulties | Very low outside credit scores, a loan 42% larger than the price of the goods, and a large loan overall |
+
+The approved persona has no credit history and is approved anyway, while the denied persona has one and is denied anyway, so the model does more than apply "no history, no loan." Both keep the same decision under a stricter rule that denies only the riskiest 5%. The drivers describe what the score is associated with, not what causes default.
+
+### The model behind the presentation
+
+Re-running `modeling.qmd` with current package versions (xgboost 3.2.1.1, caret 7.0.1) makes the randomized search select different hyperparameters, giving a holdout AUC of 0.7496. To present the model reported above, [`rebuild_presentation_cache.R`](homecredit-eda/rebuild_presentation_cache.R) skips the search and refits the final model with the original settings, reusing `modeling.qmd`'s own code for every other step. Its holdout AUC is **0.7550** rather than 0.7556, a gap that most likely comes from xgboost's random row and column sampling differing across versions. All presentation results use this refit model.
+
+### How to run
+
+The prepared data from `data_preparation.R` must exist first. Then, from `homecredit-eda/`:
+
+```
+Rscript rebuild_presentation_cache.R                       # about 2 minutes; writes presentation_cache/
+Rscript -e 'rmarkdown::render("01_business_impact.Rmd")'
+Rscript -e 'rmarkdown::render("02_personas.Rmd")'
+```
+
+- **Cache:** `presentation_setup.R` loads the model, holdout, and predictions from `presentation_cache/model_objects.rds` (git-ignored, about 650 MB), so each notebook renders in seconds. Build the cache with `rebuild_presentation_cache.R` before rendering. If no cache exists, `presentation_setup.R` falls back to running all of `modeling.qmd`, which fails inside a render (both files have a chunk named `setup`) and uses whatever hyperparameters the search selects.
+- **Choosing personas:** change `approved_pick` or `denied_pick` in the `pick` chunk of `02_personas.Rmd` to use a different candidate row, or `deny_share` in the `rule` chunk to try another decision rule.
+- **Outputs:** both notebooks write to `presentation_results/`. The CSV tables there are git-ignored by the `*.csv` rule and regenerate on every render.
