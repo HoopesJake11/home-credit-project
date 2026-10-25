@@ -1,0 +1,716 @@
+---
+title: "Model Card: Home Credit Payment-Difficulty Model"
+subtitle: "XGBoost credit-risk ranking model — performance, economics, explainability, fairness and deployment readiness"
+author: "Jake Hoopes"
+date: "2026-10-25"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    number-sections: true
+    embed-resources: true
+    theme: cosmo
+    fig-align: center
+    fig-responsive: true
+    tbl-cap-location: top
+    df-print: kable
+    css: model_card.css
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+suppressPackageStartupMessages({ library(tidyverse); library(knitr) })
+
+# All results are read from saved, verified artifacts produced in Steps 1-7.
+# Nothing is retrained here. The folder is git-ignored; see Model Details.
+mc <- "../models/model_card"
+needed <- c("step1_checks.csv", "step3_fold_metrics.csv", "step3_summary_metrics.csv",
+            "step3_calibration_comparison.csv", "step4_assumption_check.csv", "step4_term_sensitivity.csv",
+            "step4_empirical_optima.csv", "step5_probability_metrics.csv", "step5_threshold_results.csv",
+            "step5_financial_results.csv", "step5_bootstrap_ci.csv", "step5_metadata.rds",
+            "step6_feature_importance_top15.csv", "step6_importance_by_family.csv", "step6_adverse_action_mapping.csv",
+            "step6_waterfall_cases.csv", "step6_protected_attribute_rank.csv", "step7_group_metrics.csv",
+            "step7_disparities_bootstrap.csv", "step7_direct_term_decomposition.csv",
+            "step7_threshold_sensitivity_gaps.csv", "step7_deployment_risk_register.csv",
+            "step7_risk_rating_criteria.csv", "step7_elderly_holdout_check.csv")
+missing <- needed[!file.exists(file.path(mc, needed))]
+if (length(missing)) stop("Model-card artifacts missing from ", mc, ": ", paste(missing, collapse = ", "))
+
+rd <- function(f) read_csv(file.path(mc, f), show_col_types = FALSE)
+img <- function(f) file.path(mc, f)
+
+s1   <- rd("step1_checks.csv")
+s3f  <- rd("step3_fold_metrics.csv")
+s3c  <- rd("step3_calibration_comparison.csv")
+s4a  <- rd("step4_assumption_check.csv")
+s4t  <- rd("step4_term_sensitivity.csv")
+s4o  <- rd("step4_empirical_optima.csv")
+s5p  <- rd("step5_probability_metrics.csv")
+s5t  <- rd("step5_threshold_results.csv")
+s5f  <- rd("step5_financial_results.csv")
+s5b  <- rd("step5_bootstrap_ci.csv")
+s5m  <- readRDS(file.path(mc, "step5_metadata.rds"))
+s6i  <- rd("step6_feature_importance_top15.csv")
+s6fam <- rd("step6_importance_by_family.csv")
+s6aa <- rd("step6_adverse_action_mapping.csv")
+s6w  <- rd("step6_waterfall_cases.csv")
+s6pr <- rd("step6_protected_attribute_rank.csv")
+s7g  <- rd("step7_group_metrics.csv")
+s7d  <- rd("step7_disparities_bootstrap.csv")
+s7dec <- rd("step7_direct_term_decomposition.csv")
+s7ts <- rd("step7_threshold_sensitivity_gaps.csv")
+s7r  <- rd("step7_deployment_risk_register.csv")
+s7rc <- rd("step7_risk_rating_criteria.csv")
+s7e  <- rd("step7_elderly_holdout_check.csv")
+
+# Formatting helpers.
+pct  <- function(x, d = 1) sprintf(paste0("%.", d, "f%%"), 100 * x)
+pp   <- function(x, d = 1) sprintf(paste0("%+.", d, "f pp"), 100 * x)
+usd  <- function(x, d = 2) paste0(ifelse(x < 0, "−$", "$"), formatC(abs(x), format = "f", digits = d, big.mark = ","))
+usdm <- function(x) paste0(ifelse(x < 0, "−$", "$"), sprintf("%.2fM", abs(x) / 1e6))
+num  <- function(x, d = 4) formatC(x, format = "f", digits = d)
+cnt  <- function(x) formatC(x, format = "d", big.mark = ",")
+ci   <- function(lo, hi, f = pct) paste0("[", f(lo), ", ", f(hi), "]")
+
+# Key values used throughout.
+hold      <- filter(s5t, set == "Holdout")
+oof_t     <- filter(s5t, set == "Development OOF")
+hp_platt  <- filter(s5p, set == "Holdout", score == "Platt (frozen)")
+hp_raw    <- filter(s5p, set == "Holdout", score == "Raw")
+cv_mean   <- mean(s3f$auc); cv_sd <- sd(s3f$auc)
+cv_pooled <- s3c$auc[s3c$score == "raw"]
+fin_h     <- filter(s5f, set == "Holdout")
+f24 <- filter(fin_h, scenario == "Base (24-month)"); f36 <- filter(fin_h, scenario == "Base, 36-month term")
+b24 <- filter(s5b, metric == "improvement_per_applicant_usd__Base (24-month)")
+b36 <- filter(s5b, metric == "improvement_per_applicant_usd__Base, 36-month term")
+g   <- function(attr, grp, col) s7g[[col]][s7g$attribute == attr & s7g$group == grp]
+pstar <- setNames(s4a$p_star, s4a$scenario)
+hold_prev <- (hold$TP_declined_target1 + hold$FN_approved_target1) / hold$applicants
+s1_diff <- rd("step1_difference_summary.csv")
+s1_maxdiff <- format(as.numeric(s1_diff$Value[s1_diff$Metric == "Max |difference|"]), digits = 2, scientific = TRUE)
+
+# Consistency guard: stop if any headline figure disagrees with the verified results.
+stopifnot(
+  round(hp_platt$auc, 4) == 0.7551, round(cv_mean, 4) == 0.7592, round(cv_sd, 4) == 0.0011,
+  round(100 * hold$approval_rate, 1) == 94.9, round(100 * hold$precision, 1) == 33.6,
+  round(100 * hold$recall, 1) == 21.1, round(f24$improvement_per_applicant_usd, 2) == 15.84,
+  round(f36$improvement_per_applicant_usd, 2) == 0.79, b36$lo95 < 0, b36$hi95 > 0,
+  round(100 * g("CODE_GENDER", "F", "approval_rate"), 1) == 96.3,
+  round(100 * g("CODE_GENDER", "M", "approval_rate"), 1) == 92.4,
+  round(100 * g("NAME_EDUCATION_TYPE", "Higher education", "approval_rate"), 1) == 98.1,
+  round(100 * g("NAME_EDUCATION_TYPE", "Secondary / secondary special", "approval_rate"), 1) == 93.9,
+  g("NAME_EDUCATION_TYPE", "Academic degree", "n") == 37,
+  all(s1$Passed), round(pstar[["Base"]], 4) == 0.2493)
+
+# HTML tables bypass Markdown, so convert `code` spans to <code> before rendering.
+kt <- function(df, ...) {
+  df <- mutate(df, across(where(is.character), ~ gsub("`([^`]+)`", "<code>\\1</code>", .x)))
+  kable(df, format = "html", escape = FALSE, table.attr = 'class="table table-sm mc-table"', ...)
+}
+```
+
+::: {.mc-banner}
+**Status: research baseline — not approved for automated lending.** TARGET = 1 means *payment difficulty* (a late installment early in the loan), not a confirmed default or charge-off. All money figures are hypothetical scenario estimates, not observed lender profit.
+:::
+
+# Executive Summary {#sec-summary}
+
+**Business problem.** Home Credit lends to people with little or no conventional credit history. This model estimates each applicant's probability of payment difficulty so that applications can be ranked by risk, which would let the lender focus scrutiny on the riskiest applicants without turning away borrowers who can repay.
+
+**What we found.** On `r cnt(hold$applicants)` labeled applicants that were held back and never used for training, tuning, calibration or threshold selection:
+
+```{r}
+#| label: tbl-exec
+#| tbl-cap: "Headline results on the untouched holdout (frozen 0.25 research threshold)"
+tibble(
+  Measure = c("Ranking quality (ROC AUC)", "Approval rate at 0.25", "Precision (declined who had payment difficulty)",
+              "Recall (payment-difficulty cases declined)",
+              "Gain vs approving everyone — hypothetical 24-month scenario",
+              "Gain vs approving everyone — hypothetical 36-month scenario"),
+  Result = c(paste(num(hp_platt$auc), ci(hp_platt$auc_lo, hp_platt$auc_hi, num)),
+             paste(pct(hold$approval_rate), ci(hold$approval_lo, hold$approval_hi)),
+             paste(pct(hold$precision), ci(hold$precision_lo, hold$precision_hi)),
+             paste(pct(hold$recall), ci(hold$recall_lo, hold$recall_hi)),
+             paste(usd(f24$improvement_per_applicant_usd), "per applicant", ci(b24$lo95, b24$hi95, usd)),
+             paste(usd(f36$improvement_per_applicant_usd), "per applicant", ci(b36$lo95, b36$hi95, usd), "— spans zero"))) |>
+  kt(align = c("l", "l"))
+```
+
+The model ranks risk consistently: holdout AUC `r num(hp_platt$auc)` against `r num(cv_mean)` in development cross-validation. Its calibrated probabilities match observed rates overall and within gender and education groups. The **0.25 threshold was fixed from development data before the holdout was opened.** At that threshold about one applicant in twenty is declined or referred, and the payment-difficulty rate among approved applicants falls from `r pct(hold_prev, 2)` (all holdout applicants) to `r pct(hold$target_rate_approved, 2)`.
+
+**Recommendation: keep this model as a research baseline. Do not use it for automated approvals or denials.** Four problems each block deployment on their own:
+
+1. **It uses gender and marital status directly.** Gender is its fourth most influential input. About two-thirds of the 3.9-point approval gap between women and men comes from that direct use. Both are prohibited bases under U.S. fair-lending rules (Regulation B).
+2. **It uses age in a way that sometimes counts against applicants aged 62 and over**, which the age rules for credit scoring do not allow.
+3. **Its main driver is a set of external scores whose source and meaning are undocumented**, so it cannot give declined applicants specific, accurate reasons.
+4. **Its financial case is hypothetical.** Under a plausible 36-month loan term the threshold adds essentially nothing, and the label measures early payment difficulty, not losses.
+
+**Before deployment could be considered:**
+
+- legal review of every restricted or potentially discriminatory input;
+- a rebuilt, compliant candidate model validated the same way;
+- documentation of the external scores and tested adverse-action reason codes;
+- validation against real loss, term and cost data;
+- independent model validation with ongoing fairness and drift monitoring.
+
+# Model Details {#sec-details}
+
+```{r}
+#| label: tbl-details
+#| tbl-cap: "Model facts"
+hp <- s5m$hyperparameters
+tibble(
+  Item = c("Model type", "Software", "Final saved model", "Training data (final model)", "Target",
+           "Predictors", "Hyperparameters", "Class-imbalance handling", "Calibration (model card)", "Decision rule (research)"),
+  Detail = c("Gradient-boosted decision trees (XGBoost), binary classification, `binary:logistic` objective",
+             paste0(s5m$versions$R, "; xgboost ", s5m$versions$xgboost, "; caret ", s5m$versions$caret,
+                    " (custom caret method, because caret's built-in `xgbTree` does not work with xgboost 3.x)"),
+             "`models/final_home_credit_xgb.rds`: caret `train` object fit on all 307,511 labeled rows; produced the Kaggle submission",
+             "307,511 applicants from Kaggle `application_train.csv`; 24,825 with TARGET = 1 (8.07%)",
+             "TARGET = 1: \"late payment more than X days on at least one of the first Y installments\" (X and Y not disclosed). TARGET = 0: all other cases.",
+             "167 engineered predictors → 300 columns after dummy encoding; 71 columns are actually used by the depth-2 trees",
+             sprintf("nrounds = %d, max_depth = %d, eta = %.3f, gamma = %g, colsample_bytree = %.2f, min_child_weight = %d, subsample = %.2f; eval_metric = logloss; nthread = 4",
+                     hp$nrounds, hp$max_depth, hp$eta, hp$gamma, hp$colsample_bytree, hp$min_child_weight, hp$subsample),
+             "None (weighting and downsampling both lowered cross-validated AUC)",
+             sprintf("Platt scaling fitted on development out-of-fold predictions: p = logistic(%.4f + %.4f × logit(raw p))", s5m$platt[["a"]], s5m$platt[["b"]]),
+             "Approve if calibrated probability < 0.25; otherwise decline or refer")) |>
+  kt(align = c("l", "l"))
+```
+
+**Data sources.** The data are Kaggle's *Home Credit Default Risk* competition files. The model uses `application_train.csv` (one row per applicant) and `bureau.csv` (1.7 million prior credits reported by other lenders), aggregated to one row per applicant. The other supplementary tables (`previous_application`, `installments_payments`, `POS_CASH_balance`, `credit_card_balance`, `bureau_balance`) were not used. The data's country, currency and time period are not disclosed.
+
+**Feature engineering** (`data_preparation.R`, driven by decisions recorded in the EDA):
+
+- **Cleaning:** income capped at the training 99th percentile; the 365243 "days employed" sentinel recoded to a not-employed flag; rare categories pooled.
+- **Affordability ratios:** loan-to-value, payment-to-income, credit-to-income, credit-to-annuity.
+- **External-score summaries:** mean, minimum and maximum.
+- **Tenure and age** expressed in years.
+- **Bureau aggregates:** open credits, debt-to-credit, overdue amounts, history length.
+- **Missing-value handling:** 18 missing-value flags, plus bands and interaction terms.
+- **Train/test consistency:** every learned parameter comes from training data and is re-applied unchanged to test data.
+
+**How the model was built and validated.**
+
+1. **Selection** (`modeling.qmd`): a stratified 80/20 development/holdout split (seed 6493). Logistic regression, random forest and XGBoost were compared by 3-fold CV AUC; XGBoost won. Imbalance strategies were tested, and a 20-configuration randomized search was run on development data.
+2. **Model-card validation** (this document):
+   - five-fold cross-validation on the 246,009 development rows, with preprocessing re-learned inside each fold;
+   - calibration and threshold choice from development data only;
+   - one evaluation of a development-only model on the untouched 61,502-row holdout.
+
+**Reproducibility.** Reloading the saved model reproduces all 48,744 Kaggle submission predictions; the largest difference is `r s1_maxdiff`, which is floating-point noise from the CSV round-trip, and all `r nrow(s1)` checks passed. The development-only model reproduces the notebook's historical holdout AUC of 0.7556 exactly when the original preprocessing is used. Analysis scripts and saved outputs are in `models/model_card/` (git-ignored because of size and data licensing). This notebook reads those outputs and does not retrain anything.
+
+# Intended Use {#sec-use}
+
+| Aspect | Description |
+|:---|:---|
+| **Primary intended use** | Research and education: ranking loan applicants by estimated risk of early payment difficulty, and studying the trade-offs between performance, economics, explainability and fairness. |
+| **Possible future decision support** (only after the conditions in @sec-risks are met) | Prioritizing applications for human underwriting review; routing higher-risk applications to extra income or document verification; informing portfolio-level risk monitoring. |
+| **Intended audience** | Credit-risk and analytics teams, model-risk management, compliance and legal reviewers, and business leadership evaluating whether a compliant version is worth building. |
+| **Out of scope / not supported** | **Automated approval or denial of credit**; setting individual prices, limits or terms; generating adverse-action notices; use in any market, product or period other than the one the data represent; any use while gender, marital status or unrestricted age remain inputs. |
+
+: Intended and unsupported uses {#tbl-use}
+
+# Performance Metrics {#sec-performance}
+
+Three kinds of results appear below. They come from different data and models, so they should not be ranked against each other:
+
+- **New model-card validation:** five-fold development cross-validation and the untouched holdout.
+- **Historical results** from `modeling.qmd`.
+- **Kaggle scores**, recorded by hand.
+
+```{r}
+#| label: tbl-auc
+#| tbl-cap: "ROC AUC across evaluations"
+tibble(
+  Evaluation = c("Five-fold cross-validation (new)", "Untouched holdout (new, primary)", "Historical holdout (`modeling.qmd`)",
+                 "Kaggle public score (historical)", "Kaggle private score (historical)",
+                 "Historical exploration CV (untuned configuration)", "Historical tuning CV"),
+  Model = c("Final configuration, 5 × ~197k-row fits, fold-specific preprocessing",
+            "Final configuration fit on 246,009 development rows, development-only preprocessing",
+            "Same configuration, original whole-data preprocessing (reproduced exactly in this work)",
+            "Final model refit on all 307,511 rows", "Final model refit on all 307,511 rows",
+            "Depth-5 starting configuration, 50,001-row sample, 3-fold", "Best of 20 configurations, 5,000-row sample, 3-fold"),
+  `ROC AUC` = c(paste0(num(cv_mean), " ± ", num(cv_sd), " (pooled ", num(cv_pooled), ")"),
+                paste(num(hp_platt$auc), ci(hp_platt$auc_lo, hp_platt$auc_hi, num)),
+                "0.7556", "0.75749", "0.75276", "0.7575", "0.7085"),
+  Note = c("Development data only", "Single, final evaluation", "Recorded in the modeling notebook",
+           "Late submission; entered manually from Kaggle", "Late submission; entered manually from Kaggle",
+           "Different model settings; not comparable", "Much smaller sample; not comparable")) |>
+  kt(align = c("l", "l", "l", "l"))
+```
+
+The holdout AUC is `r num(cv_mean - hp_platt$auc, 4)` below cross-validation, and the confidence intervals overlap. The holdout and both Kaggle scores agree within a few thousandths. Together, these suggest the model generalizes to new applicants drawn from the same population.
+
+```{r}
+#| label: fig-roc
+#| fig-cap: "ROC curve on the untouched holdout (orange) and development out-of-fold predictions (blue, dashed). The dot marks the frozen 0.25 threshold."
+#| fig-alt: "ROC curves for holdout and development predictions nearly overlap; the 0.25 threshold sits at about 21% recall and 3.7% false positive rate."
+#| out-width: "62%"
+include_graphics(img("step5_roc_holdout.png"))
+```
+
+**Classification at the 0.25 research threshold.** In this card the "positive" prediction is *decline or refer*. Precision is the share of declined applicants who actually had payment difficulty; recall is the share of payment-difficulty applicants who were declined.
+
+```{r}
+#| label: tbl-confusion
+#| tbl-cap: "Holdout confusion matrix at threshold 0.25 (n = 61,502)"
+tibble(` ` = c("<b>Actual: payment difficulty (TARGET = 1)</b>", "<b>Actual: no payment difficulty (TARGET = 0)</b>", "<b>Total</b>"),
+       `Declined / referred (p ≥ 0.25)` = c(cnt(hold$TP_declined_target1), cnt(hold$FP_declined_target0), cnt(hold$declined)),
+       `Approved (p < 0.25)` = c(cnt(hold$FN_approved_target1), cnt(hold$TN_approved_target0), cnt(hold$approved)),
+       Total = c(cnt(hold$TP_declined_target1 + hold$FN_approved_target1), cnt(hold$FP_declined_target0 + hold$TN_approved_target0), cnt(hold$applicants))) |>
+  kt(align = c("l", "r", "r", "r"))
+```
+
+```{r}
+#| label: tbl-threshold-metrics
+#| tbl-cap: "Threshold metrics: holdout (with 95% Wilson intervals) vs development out-of-fold"
+tibble(
+  Metric = c("Approval rate", "Decline / referral rate", "Precision", "Recall (true positive rate)", "Specificity",
+             "False positive rate", "Payment-difficulty rate among approved", "Payment-difficulty rate among declined"),
+  Holdout = c(paste(pct(hold$approval_rate), ci(hold$approval_lo, hold$approval_hi)), pct(hold$decline_rate),
+              paste(pct(hold$precision), ci(hold$precision_lo, hold$precision_hi)),
+              paste(pct(hold$recall), ci(hold$recall_lo, hold$recall_hi)),
+              paste(pct(hold$specificity), ci(hold$specificity_lo, hold$specificity_hi)),
+              paste(pct(hold$fpr), ci(hold$fpr_lo, hold$fpr_hi)),
+              paste(pct(hold$target_rate_approved, 2), ci(hold$target_rate_approved_lo, hold$target_rate_approved_hi, \(x) pct(x, 2))),
+              paste(pct(hold$target_rate_declined), ci(hold$target_rate_declined_lo, hold$target_rate_declined_hi))),
+  `Development OOF` = c(pct(oof_t$approval_rate), pct(oof_t$decline_rate), pct(oof_t$precision), pct(oof_t$recall),
+                        pct(oof_t$specificity), pct(oof_t$fpr), pct(oof_t$target_rate_approved, 2), pct(oof_t$target_rate_declined))) |>
+  kt(align = c("l", "l", "l"))
+```
+
+**Calibration.** The raw XGBoost scores are slightly compressed (calibration slope about 1.08). The Platt correction, fitted only on development predictions, carries over to the holdout. Near the threshold the calibrated scores run about one point high (0.20–0.25 band: 22.3% predicted vs 21.3% observed).
+
+```{r}
+#| label: tbl-calibration
+#| tbl-cap: "Probability accuracy on the holdout and in development cross-validation"
+s5p |>
+  transmute(Data = set, Score = score, Brier = num(brier, 4), `Log loss` = num(log_loss, 4),
+            `Mean predicted / observed` = paste0(pct(mean_pred, 2), " / ", pct(observed_rate, 2)),
+            `Calibration intercept [95% CI]` = paste(num(cal_intercept, 3), ci(cal_intercept_lo, cal_intercept_hi, \(x) num(x, 3))),
+            `Calibration slope [95% CI]` = paste(num(cal_slope, 3), ci(cal_slope_lo, cal_slope_hi, \(x) num(x, 3)))) |>
+  kt(align = c("l", "l", "r", "r", "r", "l", "l"))
+```
+
+```{r}
+#| label: fig-reliability
+#| fig-cap: "Holdout reliability: observed payment-difficulty rate against mean predicted probability in 20 equal-size bins, for raw and Platt-calibrated scores. The dashed diagonal is perfect calibration; bars are 95% intervals; the dotted line is the 0.25 threshold."
+#| fig-alt: "Reliability plots; Platt-calibrated points sit on the diagonal while raw points bend above it at higher risk."
+#| out-width: "85%"
+include_graphics(img("step5_reliability_holdout.png"))
+```
+
+# Decision Threshold Analysis {#sec-threshold}
+
+::: {.callout-important}
+## Hypothetical economics
+Every money figure in this section comes from **scenario assumptions** applied to the model's predictions. None is an observed profit. TARGET = 1 is a payment difficulty, so turning it into a loss requires an assumed share of such cases that end in charge-off (*c*). No source exists for that share.
+:::
+
+**Method.** Each approved applicant contributes the lifetime margin of a repaid loan, **G**, if they have no payment difficulty, and loses **L = c × EAD × LGD** if they do. Declined applicants contribute zero. Funding and operating costs sit only in G, and recoveries only in the loss given default (LGD), so nothing is counted twice. Expected profit is maximized by approving whenever an applicant's calibrated probability is below the **break-even probability**:
+
+::: {.mc-formula}
+**p\*** = G / (G + L)  approve when calibrated p &lt; p\*;  decline or refer otherwise
+:::
+
+**Sourced inputs.** Home Credit's own FY2018 results give a net interest margin of 15.8% and a cost-to-income ratio of 42.2%. Approved prior cash loans in the dataset imply a median 24-month term at about 40% APR. Loss given default spans 45% (the Basel senior-unsecured benchmark) to 96% (debt buyers paid about 4 cents per dollar, FTC 2013). Contextual figures come from the Federal Reserve, FDIC and TransUnion (see @sec-references). The dollar amounts use the TransUnion average personal-loan balance of $8,437 purely for illustration; the dataset's currency is undisclosed, and p\* does not depend on loan size.
+
+```{r}
+#| label: tbl-scenarios
+#| tbl-cap: "Financial scenarios (per unit of principal; dollar values at P = $8,437 for illustration)"
+s4a |>
+  transmute(Scenario = scenario,
+            `Annual margin m` = pct(m, 2),
+            `Profit if repaid, G` = paste0(num(G, 3), " (", usd(G_usd, 0), ")"),
+            `Exposure at default` = num(EAD, 3), LGD = pct(lgd, 1),
+            `Loss conversion c` = pct(c, 0),
+            `Loss per TARGET = 1, L` = paste0(num(L, 3), " (", usd(L_usd, 0), ")"),
+            `Break-even p*` = num(p_star, 3),
+            `Margin source` = margin_source) |>
+  kt(align = c("l", rep("r", 7), "l"))
+```
+
+The base scenario combines Home Credit's margin, three installments paid before default, the midpoint loss given default (70.5%, an assumption) and *c* = 50% (an assumption). Its break-even probability is **`r num(pstar[["Base"]], 4)`**, which rounds to the **0.25 research threshold**.
+
+**Why 0.25 was chosen before the holdout was opened:**
+
+- It is the theoretical base-case break-even, rounded.
+- The profit-maximizing threshold found empirically on development out-of-fold predictions was 0.2525, with a bootstrap interval of 0.2475–0.275.
+- The base-case profit curve is flat between about 0.23 and 0.30.
+- The threshold, the calibration and the financial assumptions were all frozen before any holdout outcome was examined.
+
+```{r}
+#| label: fig-profit
+#| fig-cap: "Development data: expected profit per applicant against threshold for the three scenarios (hypothetical). Dotted lines mark each scenario's theoretical break-even p*; dots mark the empirical optimum."
+#| fig-alt: "Profit curves by scenario. Base peaks near 0.25; conservative peaks near 0.035 and is negative elsewhere; optimistic rises to a plateau."
+#| out-width: "85%"
+include_graphics(img("step4_profit_vs_threshold.png"))
+```
+
+```{r}
+#| label: fig-gain-zoom
+#| fig-cap: "Development data, base scenario: gain over approving everyone, with a 95% bootstrap band. Only sampling uncertainty is shown, not assumption uncertainty."
+#| fig-alt: "Base-case gain curve peaking at about $15 per applicant near 0.25; the band stays above zero from about 0.17 to 0.45."
+#| out-width: "78%"
+include_graphics(img("step4_base_gain_zoom.png"))
+```
+
+**Holdout outcomes at the frozen 0.25 threshold** (61,502 applicants; `r cnt(hold$approved)` approved, `r cnt(hold$declined)` declined or referred):
+
+```{r}
+#| label: tbl-financial
+#| tbl-cap: "Hypothetical financial outcomes on the holdout at t = 0.25 (USD at P = $8,437; bootstrap 95% CI for the gain)"
+boot_lookup <- setNames(paste(ci(s5b$lo95, s5b$hi95, usd)), sub("improvement_per_applicant_usd__", "", s5b$metric))
+fin_h |>
+  mutate(order = match(scenario, c("Base (24-month)", "Base, 36-month term", "Conservative", "Optimistic"))) |>
+  arrange(order) |>
+  transmute(Scenario = scenario,
+            `Profit / applicant` = usd(profit_per_applicant_usd),
+            `Profit / approved loan` = usd(profit_per_approved_usd),
+            `Approve-everyone / applicant` = usd(approve_all_per_applicant_usd),
+            `Gain vs approve-everyone / applicant` = paste("<b>", usd(improvement_per_applicant_usd), "</b>", boot_lookup[scenario]),
+            `Total gain` = usdm(improvement_total_usd),
+            `Avoided proxy losses` = usdm(avoided_proxy_losses_usd),
+            `Forgone margin` = usdm(foregone_margin_usd)) |>
+  kt(align = c("l", rep("r", 7)))
+```
+
+- **Base, 24-month:** the gain over approving everyone is **`r usd(f24$improvement_per_applicant_usd)` per applicant**, or about `r usdm(f24$improvement_total_usd)` across the holdout. The development estimate was $15.39, so the result held up.
+- **36-month term:** the gain falls to **`r usd(f36$improvement_per_applicant_usd)`**, with an interval spanning zero. Longer loans earn more margin while losses barely change, which moves the break-even point up to 0.332. The data hint that current loans may run about 36 months (median credit/annuity ratio 20.7), so this term uncertainty is unresolved and material.
+- **Conservative:** the threshold cuts losses sharply, but the portfolio still loses money.
+- **Optimistic:** 0.25 is too strict and gives up more margin than it saves.
+
+```{r}
+#| label: tbl-term
+#| tbl-cap: "Base-case break-even probability by assumed loan term (40% APR)"
+s4t |> transmute(`Term (months)` = term_months, `Profit if repaid G` = num(G, 3), `Loss L` = num(L, 3), `Break-even p*` = num(p_star, 3)) |>
+  kt(align = c("r", "r", "r", "r"))
+```
+
+```{r}
+#| label: fig-heatmap
+#| fig-cap: "Development data: the optimal threshold depends mostly on the two least-supported assumptions, the loss-conversion rate c and loss given default. It ranges from about 0.11 to 0.48."
+#| fig-alt: "Heatmap of empirical and theoretical thresholds across loss conversion and LGD values."
+#| out-width: "78%"
+include_graphics(img("step4_sensitivity_heatmap.png"))
+```
+
+# SHAP Explainability {#sec-shap}
+
+**Method.**
+
+- **Model explained:** the **original final model** trained on all 307,511 applicants, so these are *fitted-model* explanations rather than evidence of out-of-sample performance.
+- **Sample:** a reproducible sample of **1,000 labeled applicants** (seed 20261025).
+- **Algorithm:** xgboost's built-in exact TreeSHAP (Lundberg et al., 2020).
+- **Units:** SHAP values are in **log-odds of payment difficulty**. For every applicant the base value (−2.442 log-odds, p = 0.080) plus the SHAP values equals the model's log-odds, within 4 × 10⁻⁶. They are **not** percentage-point changes. Where this card quotes percentage points, they come from an explicit conversion.
+- **Coverage:** 71 of the 300 encoded columns have any effect.
+
+```{r}
+#| label: fig-beeswarm
+#| column: body-outset-right
+#| fig-cap: "SHAP summary for the top 15 encoded features. Each dot is one applicant: position shows the push toward higher (right) or lower (left) predicted risk; color shows the feature's value (blue low, orange high)."
+#| fig-alt: "Beeswarm plot; average external score spreads widest, with high scores lowering risk."
+#| out-width: "100%"
+include_graphics(img("step6_shap_beeswarm.png"))
+```
+
+```{r}
+#| label: tbl-shap
+#| tbl-cap: "Top 15 predictors by mean absolute SHAP value (log-odds; in-sample, full-data model)"
+s6i |>
+  transmute(`#` = rank, Feature = paste0("<code>", feature, "</code>"), Meaning = readable,
+            `Mean |SHAP|` = num(mean_abs_shap, 3), `Share` = pct(share_of_total), Direction = direction) |>
+  kt(align = c("r", "l", "l", "r", "r", "l"))
+```
+
+```{r}
+#| label: fig-importance
+#| fig-cap: "Global importance: mean absolute SHAP value for the top 15 encoded features."
+#| fig-alt: "Bar chart led by average external score at 0.442, then loan-to-value 0.111 and loan/payment ratio 0.107."
+#| out-width: "85%"
+include_graphics(img("step6_shap_importance_top15.png"))
+```
+
+**What drives predictions.**
+
+- **External scores dominate.** The undocumented external-score family accounts for about half of all attribution (mean |SHAP| `r num(s6fam$mean_abs_shap[1], 2)` log-odds as a family). Higher scores lower predicted risk.
+- **Loan structure** comes next: borrowing more than the goods cost (loan-to-value above about 1.16), larger payments, and loans in the middle range of credit-to-payment ratios all raise risk.
+- **Existing debt:** a high share of open bureau credit still owed, or a high share of bureau accounts still open, raises risk.
+- **Job stability:** longer tenure lowers risk.
+- **Protected and sensitive characteristics also matter.** Gender is the #4 feature (being male raises predicted risk) and higher education is #8 (it lowers risk).
+- **Features with little direct effect:** `AMT_CREDIT` itself has none, plain payment-to-income is minor, and the direct age term ranks only #22 because its effect is spread across interaction features.
+
+These are predictive associations, not causes.
+
+```{r}
+#| label: fig-waterfall-high
+#| column: body-outset-right
+#| fig-cap: "Highest-risk applicant in the sample (raw p = 0.571). Every top factor raises risk: very low external scores, loan-to-value of 1.42, and heavily used existing credit. This applicant did not actually have payment difficulty."
+#| fig-alt: "Waterfall from base log-odds to the applicant's prediction, all bars increasing risk."
+#| out-width: "92%"
+include_graphics(img("step6_waterfall_high_risk.png"))
+```
+
+```{r}
+#| label: fig-waterfall-low
+#| column: body-outset-right
+#| fig-cap: "Lowest-risk applicant (raw p = 0.010): high external scores, a short loan, loan-to-value of 1.0 and no open bureau debt. Being female also lowers this prediction, which is a prohibited basis in a U.S. context."
+#| fig-alt: "Waterfall with all bars decreasing risk."
+#| out-width: "92%"
+include_graphics(img("step6_waterfall_low_risk.png"))
+```
+
+Two applicants can receive very different predictions because each starts from the same base risk (about 8%) and is pushed up or down by their own characteristics. The pushes add on the log-odds scale, so the same feature value can move one applicant's *probability* more than another's.
+
+# Adverse Action Mapping {#sec-adverse}
+
+U.S. creditors must give declined applicants the **specific principal reasons** for the decision (12 CFR 1002.9(b)(2)). The CFPB has stated that a complex algorithm is no excuse (Circular 2022-03), and that checklist reasons are not enough when they do not match the real reasons (Circular 2023-03, which the CFPB site now marks as archived). An applicant's reasons must be the factors that actually raised *that applicant's* predicted risk, not the model's global feature ranking.
+
+```{r}
+#| label: tbl-adverse
+#| tbl-cap: "Candidate adverse-action explanations for the most influential risk-raising features"
+cat_of <- function(f) case_when(
+  str_detect(f, "^ext_source")                 ~ "Undocumented external score",
+  str_detect(f, "^CODE_GENDER|^NAME_FAMILY")   ~ "Prohibited basis",
+  str_detect(f, "^age_years")                  ~ "Restricted (age)",
+  str_detect(f, "^NAME_EDUCATION")             ~ "Legally problematic (disparate-impact risk)",
+  str_detect(f, "^DEF_30")                     ~ "Legally problematic (third-party data)",
+  str_detect(f, "^FLAG_DOCUMENT_3")            ~ "Undocumented field",
+  str_detect(f, "^employed_share")             ~ "Needs verification (uses age)",
+  str_detect(f, "^ltv$|^AMT_|^bureau_")        ~ "Documented",
+  TRUE                                         ~ "Needs verification")
+s6aa |>
+  mutate(Category = cat_of(model_feature)) |>
+  transmute(`Model feature` = paste0("<code>", model_feature, "</code>"), Category,
+            `Candidate explanation` = candidate_explanation,
+            `Usable as a reason?` = supported_for_adverse_action,
+            `Limitation / concern` = limitations_or_concerns) |>
+  kt(align = c("l", "l", "l", "l", "l"))
+```
+
+**The model cannot provide reliable adverse-action reasons as built.** Among sampled applicants who would be declined at 0.25:
+
+- for **98%**, the main risk-raising factor is an undocumented external score;
+- for **42%**, gender is among the top four factors.
+
+Usable reasons are limited to documented loan-structure, bureau-debt and employment features, and even those need per-applicant validation. External scores could only be translated into plain-English reasons after the provider documents what they measure. They must not be relabeled as "poor credit score" or "insufficient credit history". Gender, marital status, education, age and social-circle data must never be given as reasons.
+
+# Fairness Analysis {#sec-fairness}
+
+All results below are on the untouched holdout at the frozen 0.25 threshold. **Statistical disparities do not by themselves prove unlawful discrimination, and they do not rule it out.** That requires legal analysis.
+
+```{r}
+#| label: tbl-fair-groups
+#| tbl-cap: "Holdout outcomes by gender and education (95% intervals in brackets)"
+s7g |>
+  filter(attribute %in% c("CODE_GENDER", "NAME_EDUCATION_TYPE")) |>
+  mutate(order = match(group, c("F", "M", "Higher education", "Secondary / secondary special", "Incomplete higher", "Lower secondary", "Academic degree"))) |>
+  arrange(order) |>
+  transmute(Attribute = if_else(attribute == "CODE_GENDER", "Gender", "Education"),
+            Group = if_else(reliability == "Adequate", group, paste0(group, " ⚠")),
+            `n (events)` = paste0(cnt(n), " (", cnt(events), ")"),
+            Approval = paste(pct(approval_rate), ci(approval_lo, approval_hi)),
+            `Observed payment difficulty` = pct(prevalence, 2),
+            `False positive rate` = if_else(events >= 30, pct(fpr), "—"),
+            `True positive rate` = if_else(events >= 30, pct(tpr), "—"),
+            Precision = if_else(is.na(precision), "—", pct(precision)),
+            AUC = if_else(is.na(auc), "—", paste(num(auc, 3), ci(auc_lo, auc_hi, \(x) num(x, 3)))),
+            `Predicted / observed` = if_else(events >= 30, paste0(pct(mean_pred, 2), " / ", pct(prevalence, 2)), "—"),
+            Reliability = reliability) |>
+  kt(align = c("l", "l", "r", "l", "r", "r", "r", "r", "l", "r", "l"))
+```
+
+⚠ **Academic degree** (37 applicants, 1 payment-difficulty case) is too small to support any conclusion. **Lower secondary** (756 applicants, 75 cases) has wide intervals.
+
+```{r}
+#| label: tbl-fair-gaps
+#| tbl-cap: "Key disparities (group minus reference; applicant-level bootstrap 95% CI)"
+s7d |>
+  filter((group == "M" & reference == "F") | (group == "Secondary / secondary special" & reference == "Higher education") |
+         (group == "Single / not married" & reference == "Married") | (group == "< 30" & reference == "40-49")) |>
+  filter(metric %in% c("approval", "fpr", "tpr", "prevalence")) |>
+  mutate(val = paste(pp(difference), ci(diff_lo, diff_hi, pp))) |>
+  select(group, reference, metric, val) |>
+  pivot_wider(names_from = metric, values_from = val) |>
+  left_join(s7d |> filter(metric == "approval") |> select(group, reference, approval_ratio), by = c("group", "reference")) |>
+  transmute(Comparison = paste(group, "vs", reference), `Approval gap` = approval, `Approval ratio` = num(approval_ratio, 3),
+            `False positive rate gap` = fpr, `True positive rate gap` = tpr, `Payment-difficulty gap` = prevalence) |>
+  kt(align = c("l", "l", "r", "l", "l", "l"))
+```
+
+**Gender.**
+
+- **Approval:** women `r pct(g("CODE_GENDER","F","approval_rate"))`, men `r pct(g("CODE_GENDER","M","approval_rate"))`, a gap of **3.9 percentage points**.
+- **Repayers declined:** men who would *not* have had payment difficulty are declined at `r pct(g("CODE_GENDER","M","fpr"))`, against `r pct(g("CODE_GENDER","F","fpr"))` for women, about twice as often.
+- **Ranking and calibration:** the same for both groups (AUC 0.749 vs 0.752).
+
+**Education.**
+
+- **Approval:** higher education **`r pct(g("NAME_EDUCATION_TYPE","Higher education","approval_rate"))`**, secondary `r pct(g("NAME_EDUCATION_TYPE","Secondary / secondary special","approval_rate"))`, a gap of **about 4.3 points**.
+- **Repayers declined:** secondary-educated repayers are declined 3.1× as often (4.4% vs 1.4%).
+
+The 98.1% figure is corrected from an earlier 98.2% that came from rounding twice.
+
+```{r}
+#| label: fig-fair-groups
+#| column: body-outset-right
+#| fig-cap: "Holdout fairness metrics by group at t = 0.25, with 95% intervals. Hollow points are small or unstable groups."
+#| fig-alt: "Dot plots of approval, observed rate, false positive rate, true positive rate and AUC by gender and education group."
+#| out-width: "100%"
+include_graphics(img("step7_group_metrics.png"))
+```
+
+**Which fairness criteria are met?**
+
+| Criterion | Meaning here | Result |
+|:---|:---|:---|
+| Demographic parity | Equal approval rates across groups | **Not met.** Gaps of 3.9 points (gender) and 4.3 points (education); approval ratios of about 0.96, above the four-fifths heuristic from U.S. employment guidance, which is not a lending legal test |
+| Equal opportunity | Applicants who would repay are approved at equal rates (equal false positive rates) | **Not met.** 2.0× (gender) and 3.1× (education) |
+| Equalized odds | Equal false positive *and* true positive rates | **Not met** |
+| Predictive calibration | A given score means the same risk in every group | **Approximately met** for adequately sized groups; weaker for applicants aged 62+ (AUC 0.686, slope 0.78) |
+| Ranking quality | Equal AUC across groups | **Met** (no significant differences) |
+
+: Fairness criteria at the 0.25 threshold {#tbl-criteria}
+
+When observed rates differ between groups (men 10.0% vs women 7.1%; secondary 9.0% vs higher education 5.3%), a calibrated score with one threshold generally cannot also equalize error rates (Chouldechova, 2017; Kleinberg et al., 2016). The rate differences explain part of the outcome gaps but do not justify them automatically. The labels measure early payment difficulty rather than loss, outcomes exist only for previously approved applicants, and much of the gender gap comes from the model using gender directly.
+
+**Direct use of protected characteristics, and proxies.** Holdout SHAP values from the development-only model were used for a descriptive accounting: remove one attribute's term and re-apply the threshold. This is not a retrained model.
+
+```{r}
+#| label: tbl-decomp
+#| tbl-cap: "Approval gaps with and without the model's direct use of each attribute (holdout)"
+s7dec |>
+  filter(term_removed %in% c("Gender (CODE_GENDER)", "Education (NAME_EDUCATION_TYPE)", "Marital status (NAME_FAMILY_STATUS)", "All of the above")) |>
+  transmute(Gap = comparison, `Direct term removed` = term_removed, Actual = pp(gap_actual), `Without the term` = pp(gap_without_term),
+            `Share explained by the direct term` = pct(share_of_gap_from_term, 0)) |>
+  kt(align = c("l", "l", "r", "r", "r"))
+```
+
+- **Gender:** a direct input that raises calibrated risk for **every** man (about +1.05 percentage points on average). It accounts for about **64%** of the gender approval gap.
+- **Education:** a direct input. Higher education lowers risk by about 1.0 point, and the direct term accounts for about 42% of the education gap.
+- **Marital status:** a direct input. Unmarried categories raise risk by about 0.2 points.
+- **Age:** a direct input, and also part of two engineered features. **`r cnt(s7e$direct_age_positive)` of `r cnt(s7e$elderly_n)` applicants aged 62+** received a risk-raising direct age contribution. U.S. Regulation B allows age in scoring only if elderly applicants are never assigned a negative value.
+- **Proxies:** the gap that remains after removing the direct terms (about 1.1 points for gender) runs through other features. That can reflect genuine risk differences, proxies, or both. No single influential feature strongly stands in for gender or education; car ownership is the strongest (moderate). Combinations of features have not been tested.
+
+```{r}
+#| label: fig-decomp
+#| fig-cap: "How much of each approval gap comes from the model's direct use of an attribute (holdout; descriptive SHAP accounting)."
+#| fig-alt: "Paired bars: the gender gap falls from 3.9 to 1.4 points without the direct gender term."
+#| out-width: "80%"
+include_graphics(img("step7_direct_term_decomposition.png"))
+```
+
+**Threshold sensitivity (descriptive only; the threshold stays 0.25).**
+
+```{r}
+#| label: tbl-fair-sens
+#| tbl-cap: "Group disparities at alternative thresholds (holdout; sensitivity analysis only)"
+s7ts |>
+  transmute(Threshold = if_else(threshold == 0.25, "<b>0.25 (frozen)</b>", sprintf("%.2f", threshold)),
+            `Overall approval` = pct(overall_approval),
+            `Gender approval gap` = sprintf("%.1f pp", gender_approval_gap_pp),
+            `Gender FPR ratio (M/F)` = sprintf("%.2f×", gender_fpr_ratio_M_over_F),
+            `Education approval gap` = sprintf("%.1f pp", educ_approval_gap_pp),
+            `Education FPR ratio (Sec./Higher)` = sprintf("%.2f×", educ_fpr_ratio_sec_over_higher)) |>
+  kt(align = c("l", "r", "r", "r", "r", "r"))
+```
+
+Raising the threshold narrows the absolute approval gaps, mostly because nearly everyone gets approved, but it **widens** the relative false-positive disparity. No threshold in this range removes the disparities, and changing the threshold does not address the direct use of protected inputs.
+
+# Limitations and Deployment Risks {#sec-risks}
+
+**Rating criteria:**
+
+- **Critical:** a prohibited or restricted practice, or something that prevents compliant operation. Blocks deployment.
+- **High:** material uncertainty that could change who is approved, the economics, or customer harm. Must be resolved before a pilot.
+- **Medium:** manageable with standard validation, monitoring and governance.
+- **Low:** limited impact; document and monitor.
+
+```{r}
+#| label: tbl-risks
+#| tbl-cap: "Deployment risk register"
+s7r |>
+  mutate(rating_html = paste0('<span class="risk-', tolower(rating), '">', rating, "</span>")) |>
+  transmute(Risk = paste0("<b>", risk, "</b>"), Rating = rating_html, Evidence = evidence,
+            `Required mitigation or validation` = mitigation_or_validation) |>
+  kt(align = c("l", "c", "l", "l"))
+```
+
+**Further limitations:**
+
+- **Label vs loss.** TARGET = 1 is early payment difficulty with undisclosed definitions (X days, first Y installments). It is not charge-off, recovery or loss.
+- **Financial assumptions.** The loss conversion (*c*) and the base-case loss given default are assumptions. The loan term is unresolved (24 vs 36 months). Margin figures are 2018 portfolio averages across nine countries.
+- **Selection bias.** Outcomes exist only for previously approved applicants, so performance on applicants the lender used to decline is unknown.
+- **Domain and time.** The country, currency and period are undisclosed. Results may not carry over to other markets or later periods, and no out-of-time test was possible.
+- **Historical feature-selection leakage.** Some EDA bands and choices were made by looking at all labeled rows, holdout included. Fold-specific re-preprocessing showed the learned parameters made a negligible difference (AUC +0.00002), but the EDA-derived choices could not be refit.
+- **Explanations.** SHAP comes from the full-data model on applicants it was trained on. Credit is split among correlated features, especially the external-score summaries and the age interactions.
+- **Small groups.** Academic degree (37 applicants) and lower secondary (756) results are not reliable.
+- **Jurisdiction.** U.S. ECOA/Regulation B is the reference framework, but the data's jurisdiction is unknown. Nothing here is legal advice.
+
+**Conditions before deployment could be considered:**
+
+1. **Legal review** of sex, marital status, age and age-derived features, education, income type, car ownership, social-circle data and ID-document recency.
+2. **A compliant candidate model:**
+   - prohibited inputs removed;
+   - age removed, or constrained so elderly applicants are never disfavored;
+   - validated with the same development/holdout/calibration discipline;
+   - plus proxy, disparate-impact and less-discriminatory-alternative testing.
+3. **Documentation of the external scores** (provider, inputs, permissible use, accuracy), or their exclusion, plus specific, tested adverse-action reason codes.
+4. **Real lending economics:** observed charge-offs, recoveries, terms, pricing and costs, with the threshold re-derived from them.
+5. **Independent model validation**, out-of-time and per-market testing, a reject-inference study or limited pilot, fairness and drift monitoring, and human review of referred applicants.
+
+# References {#sec-references}
+
+**Data**
+
+- Home Credit Group. *Home Credit Default Risk* (Kaggle competition data and `HomeCredit_columns_description.csv`). <https://www.kaggle.com/c/home-credit-default-risk>
+
+**Lending economics and recoveries (published sources)**
+
+- Home Credit B.V. (28 June 2019). *IFRS consolidated results for the full-year period ended 31 December 2018, and for the three-month period ended 31 March 2019* [press release]. <https://www.homecredit.net/wp-content/uploads/2022/11/190628-HCBV-FY18_Q1_2019-Results-Announcement.pdf>
+- Board of Governors of the Federal Reserve System. *Charge-Off and Delinquency Rates on Loans and Leases at Commercial Banks* (seasonally adjusted; released 25 August 2026). <https://www.federalreserve.gov/releases/chargeoff/chgallsa.htm>
+- Board of Governors of the Federal Reserve System (2025). *Profitability of Credit Card Operations of Depository Institutions* (35th report, 2024 data). <https://www.federalreserve.gov/publications/files/ccprofit2025.pdf>
+- Board of Governors of the Federal Reserve System. *Consumer Credit — G.19* (released 7 October 2026). <https://www.federalreserve.gov/releases/G19/current/default.htm>
+- Drechsler, I., Jung, H., Peng, W., Supera, D., & Zhou, G. (2025, rev. 2026). *Credit Card Banking*. Federal Reserve Bank of New York Staff Report No. 1143. <https://www.newyorkfed.org/research/staff_reports/sr1143>
+- Federal Deposit Insurance Corporation (2026). *Quarterly Banking Profile, Second Quarter 2026*. <https://www.fdic.gov/quarterly-banking-profile/quarterly-banking-profile-second-quarter-2026.pdf>
+- Federal Trade Commission (30 January 2013). *The Structure and Practices of the Debt Buying Industry*. <https://www.ftc.gov/node/46255>
+- Basel Committee on Banking Supervision. *Basel Framework, CRE32: IRB approach — risk components* (in force 1 January 2023). <https://www.bis.org/basel_framework/chapter/CRE/32.htm?inforce=20230101&published=20200327>
+- TransUnion (6 August 2026). *Q2 2026 Credit Industry Insights Report* [press release]. <https://newsroom.transunion.com/Q2-2026-CIIR/>
+- Consumer Financial Protection Bureau (December 2025). *The Buy Now, Pay Later Market: Data Spotlight* (charge-off definition only). <https://files.consumerfinance.gov/f/documents/cfpb_bnpl-market-report_2025-12.pdf>
+
+**Regulation and supervisory guidance (U.S.)**
+
+- Consumer Financial Protection Bureau (26 May 2022). *Consumer Financial Protection Circular 2022-03: Adverse action notification requirements in connection with credit decisions based on complex algorithms*. <https://www.consumerfinance.gov/compliance/circulars/circular-2022-03-adverse-action-notification-requirements-in-connection-with-credit-decisions-based-on-complex-algorithms/>
+- Consumer Financial Protection Bureau (19 September 2023). *Consumer Financial Protection Circular 2023-03: Adverse action notification requirements and the proper use of the CFPB's sample forms provided in Regulation B* (marked archived on the CFPB site). <https://files.consumerfinance.gov/f/documents/cfpb_adverse_action_notice_circular_2023-09.pdf>
+- Regulation B (Equal Credit Opportunity Act), 12 CFR 1002.2 (definitions of "elderly" and "prohibited basis"). <https://www.consumerfinance.gov/rules-policy/regulations/1002/2/>
+- 12 CFR 1002.6 (rules concerning evaluation of applications, including sex, marital status and age). <https://www.consumerfinance.gov/rules-policy/regulations/1002/6/>
+- 12 CFR 1002.9 (notifications; statement of specific reasons). <https://www.consumerfinance.gov/rules-policy/regulations/1002/9/>
+- 29 CFR 1607.4(D), Uniform Guidelines on Employee Selection Procedures (the four-fifths heuristic; employment context, cited for comparison only). <https://www.law.cornell.edu/cfr/text/29/1607.4>
+
+**Model documentation, methods and fairness research**
+
+- Mitchell, M., Wu, S., Zaldivar, A., Barnes, P., Vasserman, L., Hutchinson, B., Spitzer, E., Raji, I. D., & Gebru, T. (2019). Model Cards for Model Reporting. *Proceedings of FAT\* '19*. <https://arxiv.org/abs/1810.03993>
+- Chen, T., & Guestrin, C. (2016). XGBoost: A Scalable Tree Boosting System. *Proceedings of KDD '16*. <https://doi.org/10.1145/2939672.2939785>
+- Lundberg, S. M., & Lee, S.-I. (2017). A Unified Approach to Interpreting Model Predictions. *Advances in Neural Information Processing Systems 30*. <https://arxiv.org/abs/1705.07874>
+- Lundberg, S. M., Erion, G., Chen, H., DeGrave, A., Prutkin, J. M., Nair, B., Katz, R., Himmelfarb, J., Bansal, N., & Lee, S.-I. (2020). From local explanations to global understanding with explainable AI for trees. *Nature Machine Intelligence, 2*, 56–67. <https://doi.org/10.1038/s42256-019-0138-9>
+- XGBoost developers. *Prediction — feature contributions (`pred_contribs`, TreeSHAP)*. <https://xgboost.readthedocs.io/en/stable/prediction.html>
+- Hardt, M., Price, E., & Srebro, N. (2016). Equality of Opportunity in Supervised Learning. *Advances in Neural Information Processing Systems 29*. <https://arxiv.org/abs/1610.02413>
+- Chouldechova, A. (2017). Fair prediction with disparate impact: A study of bias in recidivism prediction instruments. *Big Data, 5*(2). <https://arxiv.org/abs/1610.07524>
+- Kleinberg, J., Mullainathan, S., & Raghavan, M. (2017). Inherent Trade-Offs in the Fair Determination of Risk Scores. *Proceedings of ITCS 2017*. <https://arxiv.org/abs/1609.05807>
+- Platt, J. (1999). Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods. In *Advances in Large Margin Classifiers*, MIT Press. (Calibration method; no stable open link verified.)
+
+**Our own assumptions (not published findings)**
+
+- Loss conversion *c* = 25% / 50% / 100% of TARGET = 1 cases becoming charge-offs (no source exists).
+- Base-case loss given default of 70.5%: the midpoint of the sourced 45% and 96% endpoints.
+- Installments paid before default: 0 / 3 / 6.
+- Loan term of 24 months at 40% APR, derived from previous applications in the dataset (36 months shown as an alternative).
+- Illustrative principal of $8,437.
+- Cured late payers earn zero; TARGET = 0 loans are fully repaid.
+- The 0.25 threshold: a research setting, not a lending policy.

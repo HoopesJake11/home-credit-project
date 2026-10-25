@@ -11,7 +11,9 @@ Many people struggle to get loans because they have little or no credit history.
 | [homecredit-eda/eda.qmd](homecredit-eda/eda.qmd) | Exploratory data analysis notebook (rendered: [eda.html](homecredit-eda/eda.html)) |
 | [data_preparation.R](data_preparation.R) | Data preparation script: cleaning, feature engineering, bureau aggregation, train/test consistency |
 | [homecredit-eda/modeling.qmd](homecredit-eda/modeling.qmd) | Modeling notebook: benchmark, model comparison, imbalance experiment, tuning, holdout evaluation, Kaggle submission (rendered: [modeling.html](homecredit-eda/modeling.html)) |
-| [.gitignore](.gitignore) | Keeps raw data, prepared data, model objects (`models/`), and submissions (`submissions/`) out of the repository |
+| [homecredit-eda/model_card.qmd](homecredit-eda/model_card.qmd) | Model card: deployment-readiness assessment covering performance, decision threshold, SHAP explainability, adverse-action mapping, fairness and risks (styles: [model_card.css](homecredit-eda/model_card.css); the rendered HTML is submitted separately and not committed). See [Model Card](#model-card--deployment-readiness-assessment). |
+| [analysis/model_card/](analysis/model_card/) | Reproducibility scripts (Steps 1–7) behind every model-card result, with a [README](analysis/model_card/README.md) listing each script's local prerequisites, plus the source-cited [lending-economics research](analysis/model_card/step2_lending_economics.md) |
+| [.gitignore](.gitignore) | Keeps raw data, prepared data, model objects (`models/`), submissions (`submissions/`) and the rendered model card HTML out of the repository |
 
 ## Getting the data
 
@@ -213,3 +215,85 @@ quarto render modeling.qmd
 - **Compatibility fix:** caret 7.0.1's built-in `xgbTree` method is incompatible with xgboost 3.x, so the notebook defines a small compatible copy of it.
 - **Runtime:** a full render refits every model and takes roughly 10 minutes.
 - **Outputs:** it writes the final model to `models/final_home_credit_xgb.rds` and the submission to `submissions/home_credit_xgboost_submission.csv`. Both folders are git-ignored.
+
+---
+
+## Model Card — Deployment Readiness Assessment
+
+[`homecredit-eda/model_card.qmd`](homecredit-eda/model_card.qmd) documents the final model for decision-makers. It covers what the model is, what it should and should not be used for, how well it performs, which decision threshold the economics support, how it reaches its predictions, whether it treats groups fairly, and whether it is ready to deploy. It also addresses the *No decision analysis* limitation listed above. The rendered HTML is the assignment submission and is kept out of the repository.
+
+**Model and intended use.** The final model is the XGBoost classifier from the modeling notebook (`models/final_home_credit_xgb.rds`, trained on all 307,511 labeled applicants). It predicts the probability of *payment difficulty*: `TARGET = 1` means a late payment on one of the first installments, not a confirmed default or charge-off. Its intended use is **research-oriented risk ranking**. It is not intended for automated credit decisions.
+
+### Measured performance
+
+These results come from data and labels, not assumptions.
+
+| Evaluation | ROC AUC | Notes |
+|---|---|---|
+| Five-fold cross-validation on the 246,009 development rows | **0.7592** ± 0.0011 | New for the model card; preprocessing re-learned inside each fold |
+| Untouched 61,502-row holdout | **0.7551** [0.7481, 0.7622] | Development-only model; evaluated once |
+| Kaggle public / private (historical) | **0.75749 / 0.75276** | Late submission, scores recorded by hand from Kaggle |
+
+**Decision threshold.** A threshold of **0.25 on Platt-calibrated probability** was fixed from development data *before* the holdout was opened. Approve below it; decline or refer at or above it. On the holdout it gives:
+- **94.9%** approval;
+- **33.6%** precision (declined applicants who actually had payment difficulty);
+- **21.1%** recall (payment-difficulty applicants who were declined);
+- a payment-difficulty rate among approved applicants of 6.71%, against 8.07% overall.
+
+Calibrated probabilities match observed rates (holdout calibration slope 0.99).
+
+### Hypothetical financial impact
+
+These figures are scenario estimates, not observed profits. They rest on sourced assumptions plus unsourced ones, such as the share of payment-difficulty cases that become losses. See [the lending-economics research](analysis/model_card/step2_lending_economics.md).
+
+| Scenario (holdout, t = 0.25) | Gain vs approving everyone, per applicant |
+|---|---|
+| Base case, 24-month loan | **+$15.84** (95% bootstrap CI +$12.86 to +$19.07) |
+| Alternative 36-month loan | **+$0.79** (CI −$2.62 to +$4.46, which spans zero) |
+
+The loan term implied by current applications is uncertain, and under the 36-month term the threshold adds essentially nothing.
+
+### Fairness and explainability concerns
+
+- **Gender and marital status are direct model inputs.** Gender is the 4th most influential feature. Approval is 96.3% for women and 92.4% for men, a 3.9-point gap. Men without payment difficulty are declined at 5.6% against 2.7% for women. About two-thirds of the gender gap comes from the model's direct use of gender.
+- **Education:** approval is 98.1% for higher education and 93.9% for secondary, a 4.3-point gap. The Academic degree group (37 applicants) is too small to assess.
+- **Age** is used in a way that sometimes raises predicted risk for applicants aged 62 and over, which U.S. credit-scoring rules (Regulation B) do not allow.
+- **The main driver is a set of undocumented external scores.** Together with the use of gender, this means the model cannot produce specific, accurate adverse-action reasons.
+- Explanations use SHAP on a 1,000-applicant sample and are measured in log-odds, not probability points.
+
+### Recommendation
+
+**Retain the model as a research baseline. Do not use it for automated lending decisions.** Deployment could be considered only after:
+1. legal review of restricted and potentially discriminatory inputs;
+2. a compliant candidate model, built and validated the same way;
+3. documentation of the external scores and tested adverse-action reason codes;
+4. validation against real loss, term and cost data;
+5. independent validation with fairness and drift monitoring.
+
+### How to reproduce
+
+The analysis scripts are in [`analysis/model_card/`](analysis/model_card/). Its [README](analysis/model_card/README.md) lists each script's local prerequisites and run order.
+
+A fresh clone cannot run them immediately. They need:
+- the Kaggle data in `homecredit-eda/data/`;
+- the prepared data from `data_preparation.R`;
+- the saved final model and submission from `modeling.qmd`.
+
+Outputs go to the git-ignored `models/model_card/` folder. With those outputs in place, render the card from `homecredit-eda/`:
+
+```
+quarto render model_card.qmd
+```
+
+The notebook retrains nothing. It reads saved results, embeds all figures, hides code, and stops if any headline figure disagrees with the verified results. If Quarto is not on your PATH, the copy bundled with Positron works:
+
+```
+QUARTO_R="C:/Program Files/R/R-4.5.2/bin" "C:/Users/<you>/AppData/Local/Programs/Positron/resources/app/quarto/bin/quarto.exe" render model_card.qmd
+```
+
+### Use of AI
+
+I built the model card with Claude, step by step. At each step I reviewed the outputs before continuing, and every figure in the card is read from saved analysis outputs rather than typed in. Judgment calls were documented as assumptions, and errors found along the way were corrected in the record (for example, an approval rate first reported as 98.2% that was really 98.1%). These included:
+- the financial scenarios and the unsourced loss-conversion rate;
+- freezing the threshold before opening the holdout;
+- treating gender, marital status and age as compliance blockers.

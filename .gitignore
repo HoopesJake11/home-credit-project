@@ -11,6 +11,9 @@ submissions/
 *.parquet
 *.feather
 
+# Rendered model card (submitted separately; the .qmd source is tracked)
+homecredit-eda/model_card.html
+
 # R / Quarto artifacts
 .Rhistory
 .Rproj.user/
