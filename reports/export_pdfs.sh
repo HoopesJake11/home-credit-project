@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # export_pdfs.sh
-# Prints the four rendered notebooks (homecredit-eda/*.html) to PDF with headless
-# Google Chrome. Nothing is re-run: each PDF is printed from the existing HTML, so
+# Prints the rendered notebooks and model card (homecredit-eda/*.html) to PDF with
+# headless Google Chrome. Nothing is re-run: each PDF is printed from the existing HTML, so
 # it shows exactly the results recorded there. This matters most for
 # modeling.html, because re-running modeling.qmd under newer package versions
 # changes its results.
@@ -9,6 +9,8 @@
 # A temporary copy of each HTML file gets print-only CSS (wrapped code, readable
 # tables, no printed link URLs); the HTML files themselves are not changed.
 # 02_personas prints in landscape so its 24-column candidate tables fit.
+# model_card.html is git-ignored (it needs local model-card outputs to render), so
+# it is printed only when a local copy exists.
 #
 # Run from the repository root:  bash reports/export_pdfs.sh
 
@@ -36,10 +38,19 @@ PRINT_CSS='<style>
 }
 </style>'
 LANDSCAPE_CSS='<style>@page { size: Letter landscape; margin: 0.4in; } @media print { table { font-size: 6.5pt !important; } }</style>'
+# The model card uses Quarto's grid page layout (wide "body-outset" figures). Chrome
+# overlaps grid rows that break across pages, so print it as plain block layout.
+GRID_CSS='<style>@media print {
+  #quarto-content, .page-columns, main.content, section { display: block !important; }
+  .column-body-outset-right, .column-page, .column-screen-inset { width: 100% !important; margin: 0 !important; }
+  #quarto-sidebar, #quarto-margin-sidebar, nav#TOC { display: none !important; }
+}</style>'
 
-for name in eda modeling 01_business_impact 02_personas; do
+for name in eda modeling 01_business_impact 02_personas model_card; do
+  if [ ! -f "$SRC/$name.html" ]; then echo "Skipped $name (no $SRC/$name.html)"; continue; fi
   extra="$PRINT_CSS"
   [ "$name" = "02_personas" ] && extra="$extra$LANDSCAPE_CSS"
+  [ "$name" = "model_card" ] && extra="$extra$GRID_CSS"
   # Insert the CSS just before </head> in a temporary copy.
   EXTRA="$extra" python3 -c '
 import os, sys

@@ -152,7 +152,7 @@ Together they show that the model does more than apply "no history, no loan." Bo
 
 ## Model Card: Deployment Readiness
 
-The [model card](homecredit-eda/model_card.qmd) is the final deliverable of the project. It asks whether the final model is fit for real lending decisions, and documents what the model is, how well it performs, how it should and shouldn't be used, and what would have to change before deployment. All of its results come from seven tracked [analysis scripts](analysis/model_card/README.md), and the notebook itself retrains nothing.
+The model card ([PDF report](reports/model_card.pdf) · [source](homecredit-eda/model_card.qmd)) is the final deliverable of the project. It asks whether the final model is fit for real lending decisions, and documents what the model is, how well it performs, how it should and shouldn't be used, and what would have to change before deployment. All of its results come from seven tracked [analysis scripts](analysis/model_card/README.md), and the notebook itself retrains nothing.
 
 **Intended use.** Research-oriented risk ranking only. The target, `TARGET = 1`, means early payment difficulty (a late installment), not a confirmed default or loss. Automated approval or denial is explicitly out of scope.
 
@@ -202,11 +202,11 @@ The [model card](homecredit-eda/model_card.qmd) is the final deliverable of the 
 | **2. Predictive Modeling** | Select, tune, and validate a model that ranks applicants by default risk | Cross-validation, algorithm comparison, class imbalance, hyperparameter tuning, holdout validation | [PDF](reports/modeling.pdf) · [HTML](homecredit-eda/modeling.html) | [`modeling.qmd`](homecredit-eda/modeling.qmd) |
 | **3. Business Impact** | Translate model scores into lending-policy outcomes | Risk segmentation, decile analysis, policy simulation, business communication | [PDF](reports/01_business_impact.pdf) · [HTML](homecredit-eda/01_business_impact.html) | [`01_business_impact.Rmd`](homecredit-eda/01_business_impact.Rmd) |
 | **4. Applicant Personas** | Explain individual approve and deny decisions | SHAP interpretability, plain-language explanation, fairness awareness | [PDF](reports/02_personas.pdf) · [HTML](homecredit-eda/02_personas.html) | [`02_personas.Rmd`](homecredit-eda/02_personas.Rmd) |
-| **5. Model Card** | Assess performance, calibration, threshold economics, explainability, fairness, and deployment readiness | Calibration, threshold optimization, fairness metrics, adverse-action review, model documentation | Rendered HTML submitted separately (not in this repository) | [`model_card.qmd`](homecredit-eda/model_card.qmd) · [`analysis/model_card/`](analysis/model_card/) |
+| **5. Model Card** | Assess performance, calibration, threshold economics, explainability, fairness, and deployment readiness | Calibration, threshold optimization, fairness metrics, adverse-action review, model documentation | [PDF](reports/model_card.pdf) | [`model_card.qmd`](homecredit-eda/model_card.qmd) · [`analysis/model_card/`](analysis/model_card/) |
 
 The data preparation step between notebooks 1 and 2 is [`data_preparation.R`](data_preparation.R), documented in [`docs/data_preparation.md`](docs/data_preparation.md).
 
-GitHub shows `.html` files as source code, so download them to view in a browser. The PDFs are printed from those same HTML files by [`reports/export_pdfs.sh`](reports/export_pdfs.sh), with no code re-run, so they show exactly the recorded results.
+GitHub shows `.html` files as source code, so download them to view in a browser. The PDFs are printed from those same HTML files by [`reports/export_pdfs.sh`](reports/export_pdfs.sh), with no code re-run, so they show exactly the recorded results. The model card is published as a PDF only. Its HTML stays git-ignored because rendering it needs the local model-card outputs.
 
 ## Reproducibility
 
@@ -293,7 +293,7 @@ home-credit-project/
 │   ├── presentation_results/       # Charts and summaries produced by Stage 4
 │   └── data/                       # Kaggle data (git-ignored)
 ├── analysis/model_card/            # Stage 5: seven analysis scripts and lending-economics research
-├── reports/                        # PDF reports of notebooks 1-4
+├── reports/                        # PDF reports of all four notebooks and the model card
 └── docs/
     ├── data_preparation.md         # Detailed technical documentation
     └── process/                    # Archived working notes
