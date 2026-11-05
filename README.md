@@ -1,266 +1,247 @@
-# home-credit-project
-**Jake Hoopes**
+# Home Credit Default Risk | Predictive Modeling & Business Decision Analysis
 
-Project Description:
-Many people struggle to get loans because they have little or no credit history. Home Credit Group aims to improve financial inclusion by using alternative data, such as transactional and telecommunications information, to better predict whether borrowers can repay loans. The goal is to improve these predictions so qualified borrowers are not unfairly rejected and receive loans they can successfully repay.
+**Jake Hoopes** · R · tidyverse · caret · XGBoost · SHAP · Quarto · R Markdown
 
-## Repository contents
+Lenders that serve people with little or no credit history face a hard trade-off. Approve too freely and defaults rise. Screen too strictly and creditworthy borrowers get turned away. Using Home Credit's data on 307,511 past loan applications, I built a credit-risk model. The project covers four steps: exploring the data, engineering features, comparing and validating models, and testing what the model's scores would mean for an actual lending policy.
 
-| File | What it is |
-|---|---|
-| [homecredit-eda/eda.qmd](homecredit-eda/eda.qmd) | Exploratory data analysis notebook (rendered: [eda.html](homecredit-eda/eda.html)) |
-| [data_preparation.R](data_preparation.R) | Data preparation script: cleaning, feature engineering, bureau aggregation, train/test consistency |
-| [homecredit-eda/modeling.qmd](homecredit-eda/modeling.qmd) | Modeling notebook: benchmark, model comparison, imbalance experiment, tuning, holdout evaluation, Kaggle submission (rendered: [modeling.html](homecredit-eda/modeling.html)) |
-| [homecredit-eda/01_business_impact.Rmd](homecredit-eda/01_business_impact.Rmd) | Presentation notebook: what the model's holdout predictions mean for approvals and defaults (rendered: [01_business_impact.html](homecredit-eda/01_business_impact.html)) |
-| [homecredit-eda/02_personas.Rmd](homecredit-eda/02_personas.Rmd) | Presentation notebook: one approved and one denied applicant, with the drivers behind each score (rendered: [02_personas.html](homecredit-eda/02_personas.html)) |
-| [homecredit-eda/presentation_setup.R](homecredit-eda/presentation_setup.R), [rebuild_presentation_cache.R](homecredit-eda/rebuild_presentation_cache.R) | Shared setup for the presentation notebooks, and the script that builds the final model they use |
-| [homecredit-eda/presentation_results/](homecredit-eda/presentation_results/) | Summaries and charts for the slides; [FOR_DECK.md](homecredit-eda/presentation_results/FOR_DECK.md) collects everything in one file |
-| [.gitignore](.gitignore) | Keeps raw data, prepared data, model objects (`models/`), and submissions (`submissions/`) out of the repository |
+The project goes beyond a leaderboard score. I connected the model to the decision a lender actually makes: who to approve, who to review, and what changes compared with a simple rule.
 
-## Getting the data
+## Key Results
 
-The data comes from the Kaggle [Home Credit Default Risk](https://www.kaggle.com/c/home-credit-default-risk/data) competition and is not committed here because of its size (about 2.7 GB). Download it and place the CSV files in `homecredit-eda/data/`.
-
----
-
-## Data preparation
-
-[`data_preparation.R`](data_preparation.R) turns the decisions recorded in the EDA notebook into reusable R functions. It cleans the application data, engineers features, aggregates the bureau table to one row per applicant, joins everything together, and applies the exact same transformations to the train and test files. Every function is documented, and each transformation carries an `EDA:` comment naming the notebook section whose decision it implements.
-
-### How to run
-
-From the repository root:
-
-```
-Rscript data_preparation.R
-```
-
-Or from an R session, to reuse the functions:
-
-```r
-source("data_preparation.R")
-result <- run_data_preparation()   # returns train, test, params, checks
-
-# Or step by step:
-raw        <- load_raw_data("homecredit-eda/data")
-bureau_agg <- aggregate_bureau(raw$bureau)
-train      <- prepare_application(raw$train, bureau_agg)                       # learns params
-test       <- prepare_application(raw$test,  bureau_agg, params = train$params) # reuses them
-```
-
-Requires R and the `tidyverse`. A full run takes about 30 seconds.
-
-### Inputs and outputs
-
-| Input (in `homecredit-eda/data/`) | Rows × columns |
-|---|---|
-| `application_train.csv` | 307,511 × 122 |
-| `application_test.csv` | 48,744 × 121 |
-| `bureau.csv` | 1,716,428 × 17 |
-
-| Output (in `homecredit-eda/data/prepared/`, git-ignored) | Rows × columns | Contents |
+| Result | Value | What it measures |
 |---|---|---|
-| `train_prepared.rds` | 307,511 × 169 | `SK_ID_CURR`, `TARGET`, and 167 features |
-| `test_prepared.rds` | 48,744 × 168 | `SK_ID_CURR` and the same 167 features |
-| `prep_params.rds` | — | Every parameter learned from train (see below) |
+| Final model, holdout ROC AUC | **0.7556** | Final XGBoost model scored once on 61,502 applicants held out from all training and tuning |
+| Kaggle score (public / private) | **0.75749 / 0.75276** | Same model specification refit on all labeled data and scored by Kaggle (late submission) |
+| Cross-validated ROC AUC | **0.7575** | XGBoost during model selection (3-fold CV on a 50,001-row sample) |
+| Default rate: riskiest vs. safest tenth of applicants | **27.2% vs. 1.6%** | Holdout applicants grouped into deciles by predicted risk* |
+| Comparison with a "no credit history, no loan" rule | **About 200 fewer defaults per 10,000 applicants** | Illustrative, retrospective comparison at the same 85.7% approval rate* |
 
-The outputs are `.rds` files so that factor levels survive saving. They contain no missing values: numeric features are imputed and categorical features are factors with fixed levels.
+\*The decile and policy results use a refit of the same model with the same settings (holdout AUC 0.7550). See [Model Performance](#model-performance) for why the figures differ.
 
-### What the script does, and which EDA decision each step implements
+## The Business Problem
 
-The 122 raw application columns become 167 features. Seven raw columns are removed (the six inquiry counts and `FLAG_MOBIL`), five `DAYS_` columns are replaced by year versions, and 57 new columns are added.
+Home Credit lends to people that traditional banks often turn away, so many applicants arrive with a thin or missing credit file. Every lending decision risks one of two costly mistakes:
 
-**Cleaning**
+- **Approving someone who defaults** raises credit losses.
+- **Rejecting someone who would have repaid** loses revenue and shuts out a creditworthy borrower.
 
-| Transformation | EDA decision it implements |
-|---|---|
-| `DAYS_EMPLOYED` value 365243 recoded to missing; new `not_currently_employed` flag | §3.3 / Q5: the value is a sentinel (1,000 years), 99.96% pensioners, who default at 5.4% vs 8.7%. It is a category, not a measurement. |
-| `AMT_INCOME_TOTAL` capped at the train 99th percentile (472,500) | Q3: the income tail is not credible (max 117 million). Cap it, don't delete the rows. |
-| Six `AMT_REQ_CREDIT_BUREAU_*` columns dropped; replaced by a `no_inquiry_data` flag | Q9: the counts are weak (best r = +0.02) and the one-month window runs backwards, but a missing inquiry block predicts 10.3% vs 7.7% default. |
-| `FLAG_MOBIL` dropped | §3.3: it is 0 for exactly one applicant, so there is nothing to learn from it. |
-| Rare categorical levels (< 50 train rows) pooled into "Other", or folded into the most common level if "Other" would itself be rare | §3.5 / Q7: XNA gender (4), Maternity leave (5), Unknown family status (2), Unemployed (22) give unreliable rates and empty test dummies. XNA → F and Unknown → Married; the small income types pool into "Other". |
-| Missing categorical values become an explicit `"Missing"` level | §3.2: missing `OCCUPATION_TYPE` is informative (6.5% vs 8.8%, mostly pensioners). |
-| Remaining numeric gaps filled with the train median; rows are never dropped | §3.2: dropping rows with gaps would remove the riskiest applicants. |
-| `AMT_CREDIT > AMT_GOODS_PRICE` left unchanged | §3.3: true on 64.6% of loans and not an error, since fees are financed into the loan. |
+**Accuracy is the wrong yardstick here.** Only 8.07% of applicants had payment difficulties. A "model" that predicts nobody will default is 91.93% accurate and completely useless, because it can't tell one applicant from another. I used **ROC AUC** instead. It measures how well a model *ranks* risky applicants above safe ones: 0.50 is a coin flip and 1.0 is perfect.
 
-**Engineered features**
+**The question I set out to answer:**
 
-| Feature(s) | EDA basis |
-|---|---|
-| `age_years`, `years_employed`, `years_since_registration`, `years_since_id_publish`, `years_since_phone_change` | Negative day counts converted to positive years. Q8: age runs 12.3% → 4.9% default; Q5: tenure runs 11.0% → 5.2%. |
-| `employed_share_of_life` (tenure ÷ age) | Q5 + Q8: both measure stability; this separates short tenure because of youth from short tenure because of a recent job change. |
-| `ltv` (credit ÷ goods price) | Q4: 5.1% at 1.00–1.10 rising to 12.8% above 1.30. |
-| `pti` (annuity ÷ income), `credit_to_income`, `credit_to_annuity`, `income_per_person` | Q3: PTI is weak but interpretable and defensible to a regulator; the others are standard affordability ratios. |
-| `ext_source_mean`, `_min`, `_max`, `_count` | Q1: the strongest predictors, but often missing (EXT_SOURCE_1 for 56.4%). Summaries use whatever scores exist. |
-| `fields_missing` (count of blank fields per applicant) | Q6: default climbs from 6.1% with a complete record to 11.2% at 51+ blanks. |
-| 18 `<column>_missing` indicator flags | §3.2 / Q6: impute, but keep the fact that a value was filled. A flag is added when a column's missing rows differ in default rate by at least 1 percentage point on train. Flags with identical missing patterns are de-duplicated. The flags are `EXT_SOURCE_1`, `EXT_SOURCE_3`, `OWN_CAR_AGE`, `TOTALAREA_MODE`, and 14 building `_AVG` columns. |
-| Binned variables: `ltv_band`, `age_band`, `tenure_band` (with a "Not employed" level), `bureau_depth_band`, `fields_missing_band`, `pti_decile` | Q2, Q3, Q4: these relationships are U-shaped or bend, so a linear term misreads them. Q5, Q6, Q8: the band cutoffs are taken from the EDA plots. |
-| Interaction terms: `ext_mean_x_age`, `ltv_x_pti`, `thin_file` (no bureau record **and** no inquiry data) | `ext_mean_x_age` combines the two strongest relationships (Q1, Q8). `ltv_x_pti` combines two affordability stress signals (Q3, Q4). `thin_file` joins the same thin-file signal that Q2 and Q9 found from two directions (41,519 train applicants). |
+> Can predictive modeling identify higher-risk applicants and support better lending decisions without unnecessarily excluding lower-risk borrowers?
 
-**Supplementary table: bureau.** `aggregate_bureau()` reduces 1.7 million bureau rows to one row per applicant. It builds 12 features: number of credits, active credits, credit types, years since first and last credit, active credit and debt totals, debt-to-credit, active share, overdue credits, maximum overdue amount, and prolongations. `join_bureau()` left-joins them onto the application table and adds `has_bureau_record` and `bureau_debt_to_income`. Following Q2, applicants with no bureau record get an explicit flag (they default at 10.1% vs 7.7%). Their counts and sums are set to 0, which is literally true, and their ratios are set to the train median, so a zero is never mistaken for "a few credits." §3.4 found no leakage in the bureau dates, so no rows are filtered out.
+## My Analytical Contributions
 
-### EDA decisions not implemented
+This is one connected project. I did all of the analysis in the four notebooks and the data-preparation script, and each stage builds on the previous one:
 
-| Decision or finding | Why it is not in this script |
-|---|---|
-| Redundancy among the 47 building columns (AVG/MODE/MEDI triplets) | The EDA flagged this as untested. Removing columns is a feature-selection decision, so it is left to modeling, where a correlation check or regularization can make it. |
-| Two-model approach (with and without external scores) | This is a modeling decision, not a preparation step. The script supports it: `drop_external_scores()` returns the restricted feature set (168 → 158 columns in test). |
-| Age as a protected characteristic | Age is kept, because removing it is a policy call for the fairness review the EDA recommends. `age_years` and `age_band` are easy to drop there. |
-| Class imbalance (8.1% positive) | A modeling decision, not a preparation step. Weighting and downsampling were tested in the modeling notebook (see [Modeling](#modeling)). |
-| `bureau_balance`, `previous_application`, `POS_CASH_balance`, `installments_payments`, `credit_card_balance` | Not explored in the EDA, so there were no recorded decisions to implement. They are the natural next source of features. |
-| `FLAG_WORK_PHONE` / `FLAG_PHONE` duplicate dictionary descriptions | Kept as-is. The data is valid; only the documentation is ambiguous. |
+- **Exploratory data analysis:** data mapping, integrity checks, missing-value analysis, and nine business questions about default risk.
+- **Data cleaning and feature engineering:** I turned each EDA decision into a documented, reusable transformation, built 57 new features, and summarized the credit bureau table, with strict separation between training and test data.
+- **Predictive modeling:** compared three algorithms on identical CV folds, tested ways of handling the rare default class, tuned XGBoost, and validated it on an untouched holdout and on Kaggle.
+- **Risk segmentation and business decision analysis:** default rates by risk decile, policies that flag the riskiest applicants, and a comparison with a simple "no credit history" rule.
+- **Interpretability:** SHAP breakdowns of individual predictions for an approved and a denied applicant.
+- **Responsible use:** documented leakage risks, fairness concerns, and the limits of each result.
 
-### Train/test consistency
+## Analytical Approach
 
-Every value that is estimated from data is learned **from `application_train` only**, stored in `prep_params.rds`, and passed unchanged to the test call. `prepare_application()` runs the same steps in the same order for both files. It learns each parameter when `params = NULL` (train) and reuses it otherwise (test), so the two paths cannot drift apart.
-
-| Parameter learned from train | Reused on test to… |
-|---|---|
-| Income cap: 99th percentile = **472,500** | cap test income at the same value |
-| Missing-flag columns: the **18** columns listed above | create the same 18 flags, even if a column's test gap looks different |
-| PTI decile cutoffs: 0.080, 0.104, 0.125, 0.144, 0.163, 0.186, 0.213, 0.247, 0.302 | place each test applicant where they would have fallen among training applicants |
-| Medians for all **143** numeric features | fill test gaps, including columns that have no gaps in train |
-| Kept levels and fallback for all **22** categorical columns | give test factors identical levels; any unseen test level maps to the train fallback |
-| Final column list and order | select and order test columns to match train exactly |
-
-The fixed LTV, age, tenure, bureau-depth, and missing-count bands come from the EDA plots rather than from either file, so they are identical by construction. Bureau aggregates use only each applicant's own rows, so nothing is shared across applicants or files.
-
-`check_consistency()` runs at the end of every run and stops with an error if any check fails. Output from the latest run:
-
-```
-   check                                                passed
- 1 Identical columns in identical order (except TARGET) TRUE
- 2 TARGET present in train only                         TRUE
- 3 Identical column types                               TRUE
- 4 Identical factor levels                              TRUE
- 5 One row per SK_ID_CURR in train                      TRUE
- 6 One row per SK_ID_CURR in test                       TRUE
- 7 Train row count unchanged by joins                   TRUE
- 8 Test row count unchanged by joins                    TRUE
- 9 No missing values in train                           TRUE
-10 No missing values in test                            TRUE
-
-Output dimensions
-  train_prepared: 307511 rows x 169 columns
-  test_prepared:  48744 rows x 168 columns
-```
-
-As a sanity check, the prepared training data reproduces the EDA's rates. No-bureau applicants default at 10.1% vs 7.7%. The LTV bands run from 5.1% (1.00–1.10) to 12.8% (above 1.30). The "Not employed" tenure band defaults at 5.4%.
-
-### Use of AI
-
-I wrote the script with Claude, using the decision table at the end of my EDA notebook as the specification. I checked the script by running it on the full data and confirming three things: every consistency check passed, the learned income cap matched the 99th percentile reported in the EDA, and the prepared data reproduced the EDA's default rates (above). Choices that required judgment were mine, drawing on EDA findings: folding XNA gender into the majority level rather than keeping a 4-row "Other," setting counts to 0 but ratios to the median for applicants with no bureau record, and de-duplicating the building-column missing flags.
-
----
-
-## Modeling
-
-[`homecredit-eda/modeling.qmd`](homecredit-eda/modeling.qmd) ([rendered](homecredit-eda/modeling.html)) builds a model that predicts each applicant's probability of payment difficulty (`TARGET = 1`). The aim is to **rank** applicants by risk, so ROC AUC is the primary metric throughout. Only 8.07% of applicants default, so a majority-class benchmark reaches 91.93% accuracy with an AUC of only 0.50.
-
-### Approach
-
-1. **Internal holdout.** The labeled data were split once into 80% development data and a 20% holdout, stratified on `TARGET`. The holdout was not touched until the final model had been chosen.
-2. **Candidate models.** Ridge logistic regression, random forest, and XGBoost were compared on one stratified 50,001-row development sample, using identical stratified 3-fold CV folds and ROC AUC.
-3. **Class imbalance.** XGBoost was compared with no adjustment, positive-class weighting, and random downsampling, with sampling applied inside each training fold only.
-4. **Tuning.** A randomized search scored 20 XGBoost configurations with stratified 3-fold CV on a 5,000-row development sample.
-5. **Final evaluation.** The selected model was fit on all development data and evaluated once on the holdout.
-6. **Kaggle submission.** The model was then refit on all 307,511 labeled rows to predict the Kaggle test set.
-
-### Results
-
-| Model / experiment | ROC AUC | Evaluated on |
+| Stage | What I did | Notebook |
 |---|---|---|
-| Majority-class baseline | 0.5000 | Training data |
-| Ridge logistic regression | 0.7473 | 3-fold CV, exploration sample |
-| Random forest | 0.7262 | 3-fold CV, exploration sample |
-| XGBoost (initial, unadjusted) | **0.7575** | 3-fold CV, exploration sample |
-| XGBoost, positive-class weighting | 0.7514 | 3-fold CV, exploration sample |
-| XGBoost, random downsampling | 0.7495 | 3-fold CV, exploration sample |
-| Final XGBoost: untouched holdout | **0.7556** | 61,502 holdout applicants |
-| Final XGBoost: Kaggle public | **0.75749** | Kaggle test set (public portion) |
-| Final XGBoost: Kaggle private | **0.75276** | Kaggle test set (private portion) |
+| **1. Exploratory Data Analysis** | Profiled applicant characteristics, missing values, credit history, and default patterns; documented a data decision for every problem I found | [`eda.qmd`](homecredit-eda/eda.qmd) |
+| **2. Data Preparation & Feature Engineering** | Turned the EDA decisions into 167 model-ready features, with every parameter learned from training data only and 10 automated consistency checks | [`data_preparation.R`](data_preparation.R) · [details](docs/data_preparation.md) |
+| **3. Predictive Modeling** | Compared ridge logistic regression, random forest, and XGBoost; tested class weighting and downsampling; tuned and validated the final model | [`modeling.qmd`](homecredit-eda/modeling.qmd) |
+| **4. Business Impact & Interpretation** | Translated holdout predictions into lending-policy outcomes, then explained individual decisions with SHAP | [`01_business_impact.Rmd`](homecredit-eda/01_business_impact.Rmd) · [`02_personas.Rmd`](homecredit-eda/02_personas.Rmd) |
 
-These numbers come from different evaluation datasets, not one identical experiment:
-- The first six rows are mean cross-validated AUCs on the same 50,001-row development sample and folds, so they can be compared with each other.
-- The holdout AUC comes from a model trained on all development data and scored on unseen labeled applicants.
-- The Kaggle scores come from the same specification refit on all labeled data. They were obtained as a late submission after the competition closed.
+## Key Findings and Business Value
 
-### Model choice
+### 1. The model separates high-risk from low-risk applicants sharply
 
-**XGBoost was selected** for three reasons. It had the highest cross-validated AUC of the three candidate models, it led in every fold, and it was the fastest to fit.
-- **Imbalance.** Weighting and downsampling raised sensitivity at a 0.50 threshold but lowered AUC, so the unadjusted model was kept.
-- **Tuning.** The randomized search chose shallow, slowly learning, regularized trees: `nrounds = 300`, `max_depth = 2`, `eta = 0.047`, `gamma = 4`, `colsample_bytree = 0.95`, `min_child_weight = 10`, `subsample = 0.86`. The best tuning-sample CV AUC (0.7085) comes from a much smaller sample and is not comparable with the other rows.
-- **Overfitting.** In-sample AUC was 0.7639 against 0.7556 on the holdout, a gap of 0.0083. Together with Kaggle scores close to the holdout estimate, this shows limited evidence of overfitting.
+<img src="homecredit-eda/presentation_results/decile_chart.png" alt="Default rate by model risk decile, rising from 1.6% in the safest tenth to 27.2% in the riskiest tenth" width="720">
 
-### Findings
+**What this shows:** I ranked 61,502 holdout applicants by predicted risk and split them into ten equal groups. The default rate rises steadily from decile 1 to decile 10, and the riskiest tenth defaults about 17 times as often as the safest. Flagging only that riskiest 10% would catch **33.7% of all defaults** and lower the default rate among remaining applicants from 8.07% to 5.95%. That is the practical value of a good ranking: review effort goes where the risk is.
 
-- **Uses.** The model ranks applicants by estimated risk well above chance. It could help prioritize applications for review, focus underwriting resources, and flag applicants for extra verification. It should support lending decisions, not make them automatically.
-- **Drivers.** External-score features dominate the model's predictions. Loan structure, bureau history, and employment stability also contribute. These are predictive associations, not causes.
-- **Fairness.** Age and gender are among the influential predictors, so a fairness review and a legal and compliance review would be needed before any real use.
+### 2. Missing information is itself a risk signal
 
-### Limitations
+- The 14.3% of applicants with **no credit bureau record** default at 10.12%, against 7.73% for applicants with a history.
+- Applicants who left **51 or more fields blank** default at 11.2%, against 6.1% for complete applications, and the rate rises at every step in between.
+- An employment value of **365,243 days** (1,000 years) turned out to be a placeholder used almost entirely for pensioners. They default *less* often (5.4% vs. 8.7%), so I treated it as a category rather than an error.
 
-- **Possible optimism.** Some feature choices and missing-value flags used `TARGET` on the full training data, holdout rows included, before CV. CV and holdout estimates may therefore be slightly optimistic. The Kaggle scores, whose outcomes were never used, suggest the effect is small.
-- **Unused tables.** Only `bureau` was used among the supplementary tables.
-- **Noisy tuning.** The tuning sample had only 404 defaults.
-- **No decision analysis.** No decision threshold or cost-benefit analysis was done.
+**Why it matters:** a standard "fill the gaps and move on" pipeline would have thrown these signals away. I kept them as explicit flags, which are also easy to explain to an applicant.
 
-### How to run
+### 3. External credit scores carry most of the signal, which brings a trade-off
 
-The prepared files from `data_preparation.R` must exist first. Then render the notebook from `homecredit-eda/`:
+Features built from three external credit scores account for **about 67% of the model's total gain** (a measure of how much the model relies on each feature). In the EDA, default rates ranged from 3.2% to 20.0% across deciles of a single score. But these scores have no documented derivation, and one is missing for 56.4% of applicants. The strongest signal is therefore the least explainable, and it is thinnest exactly where the business needs it most.
 
-```
-quarto render modeling.qmd
-```
+### 4. The model beats simpler approaches
 
-- **Packages:** `tidyverse`, `caret`, `glmnet`, `randomForest`, `xgboost` (3.x), `pROC`, and `doParallel`.
-- **Compatibility fix:** caret 7.0.1's built-in `xgbTree` method is incompatible with xgboost 3.x, so the notebook defines a small compatible copy of it.
-- **Runtime:** a full render refits every model and takes roughly 10 minutes.
-- **Outputs:** it writes the final model to `models/final_home_credit_xgb.rds` and the submission to `submissions/home_credit_xgboost_submission.csv`. Both folders are git-ignored.
+- **Majority-class baseline:** 91.93% accuracy, ROC AUC 0.50.
+- **Other algorithms:** XGBoost (0.7575 CV AUC) beat ridge logistic regression (0.7473) and random forest (0.7262) on identical folds, and it led in every fold.
+- **A simple lending rule:** see [Business Impact](#business-impact-and-applicant-personas) below.
 
----
+These are predictive associations. They show which applicant characteristics *go along with* default, not what *causes* it.
 
-## Presentation
+## Model Performance
 
-Two notebooks turn the final model into the numbers and examples on the slides. Both use only the 61,502 holdout applicants the model never saw in training, so nothing is in-sample. [`presentation_results/FOR_DECK.md`](homecredit-eda/presentation_results/FOR_DECK.md) collects the results in one file.
+| Result | ROC AUC | Context |
+|---|---|---|
+| XGBoost, cross-validation | 0.7575 | Model selection: 3-fold CV, 50,001-row development sample |
+| Ridge logistic regression, cross-validation | 0.7473 | Model comparison, same folds |
+| Random forest, cross-validation | 0.7262 | Model comparison, same folds |
+| **Original XGBoost, holdout** | **0.7556** | **Final evaluation:** trained on 246,009 development rows, scored once on 61,502 held-out applicants |
+| Kaggle public | 0.75749 | Same specification refit on all 307,511 labeled rows (late submission) |
+| Kaggle private | 0.75276 | Same model as the public score, on the remaining Kaggle test applicants |
+| Presentation refit, holdout | 0.7550 | Refit with the original hyperparameters; used for all business-impact and persona results |
 
-### Business impact
+**These numbers aren't interchangeable.** They come from different data and different fitted models:
 
-[`01_business_impact.Rmd`](homecredit-eda/01_business_impact.Rmd) follows the success definition in the business problem statement: a lower default rate at the same approval rate, or a higher approval rate at the same default rate. It compares the model with a common rule, "no credit history, no loan," which turns away every applicant without a credit bureau record.
+- The three CV scores can be compared with each other, but not with the holdout or Kaggle scores.
+- The **holdout AUC of 0.7556** is the headline estimate of performance on new applicants. In-sample AUC was 0.7639, a gap of only 0.0083.
+- The Kaggle scores come from a model trained on more data and are scored on different applicants. Their closeness to the holdout supports it as a fair estimate.
+- The **0.7550 refit** exists because newer package versions give slightly different results (see [Reproducibility](#reproducibility)).
 
-| Result | Value |
-|---|---|
-| Default rate, riskiest vs. safest tenth of applicants | 27.2% vs. 1.6% |
-| Flag the riskiest 10% | Catches 33.7% of defaults; the default rate of approved loans falls from 8.07% to 5.95% |
-| **Same approval rate as the rule** (85.7% approved) | Default rate 7.77% (rule) vs. 5.43% (model): **200 fewer defaults per 10,000 applicants** |
-| Applicants with no credit history approved at that rate | 80.1% (the rule approves none) |
-| **Same default rate as the rule** (7.77%) | Model approves 99.3% vs. 85.7%: **1,367 more approvals per 10,000 applicants** |
+I kept XGBoost without class weighting or downsampling. Both adjustments raised sensitivity at a 0.50 cutoff but *lowered* AUC, and ranking is what the business uses.
 
-### Personas
+## Business Impact and Applicant Personas
 
-[`02_personas.Rmd`](homecredit-eda/02_personas.Rmd) picks one approved and one denied holdout applicant and splits each prediction into SHAP contributions, which show which parts of the application pushed the predicted risk up or down. The decision rule denies the riskiest 10% of applicants (predicted risk of at least 17.9%).
+### Compared with a "no credit history, no loan" rule
 
-| Persona | Holdout row | Predicted risk | Outcome | Main drivers |
+A common rule of thumb turns away every applicant without a credit bureau record. I compared that rule with the model turning away the **same number** of holdout applicants, namely the ones it rates riskiest.
+
+| Policy | Approval rate | Default rate of approved loans | Defaults per 10,000 applicants | Applicants with no bureau record approved |
 |---|---|---|---|---|
-| Approved | 46906 | 3.6% | Repaid | No credit bureau record, but strong outside credit scores, a university education, and a loan equal to the price of the goods |
-| Denied | 22892 | 60.7% | Had payment difficulties | Very low outside credit scores, a loan 42% larger than the price of the goods, and a large loan overall |
+| No credit history, no loan | 85.7% | 7.77% | 666 | 0% |
+| Model-based ranking | 85.7% | 5.43% | 465 | 80.1% |
 
-The approved persona has no credit history and is approved anyway, while the denied persona has one and is denied anyway, so the model does more than apply "no history, no loan." Both keep the same decision under a stricter rule that denies only the riskiest 5%. The drivers describe what the score is associated with, not what causes default.
+At the same approval rate, the model-based policy has about **200 fewer defaults per 10,000 applicants**. It also approves 80.1% of the applicants with no credit history whom the rule rejects outright. That matches the financial-inclusion goal of the business problem.
 
-### The model behind the presentation
+**How to read this:** it is a **retrospective, illustrative comparison** on historical holdout data, not a measured real-world outcome.
+- The rule is a simplified benchmark, not Home Credit's actual policy.
+- No costs, revenue, or loan sizes are included.
+- Outcomes exist only for loans that were actually issued.
 
-Re-running `modeling.qmd` with current package versions (xgboost 3.2.1.1, caret 7.0.1) makes the randomized search select different hyperparameters, giving a holdout AUC of 0.7496. To present the model reported above, [`rebuild_presentation_cache.R`](homecredit-eda/rebuild_presentation_cache.R) skips the search and refits the final model with the original settings, reusing `modeling.qmd`'s own code for every other step. Its holdout AUC is **0.7550** rather than 0.7556, a gap that most likely comes from xgboost's random row and column sampling differing across versions. All presentation results use this refit model.
+The notebook also includes an equal-default-rate comparison. I don't feature it here because its cutoff was chosen using the holdout outcomes.
 
-### How to run
+### Explaining individual decisions
 
-The prepared data from `data_preparation.R` must exist first. Then, from `homecredit-eda/`:
+<p>
+  <img src="homecredit-eda/presentation_results/persona_approved_drivers.png" alt="SHAP contributions for the approved persona: outside credit scores, education, and loan-to-value lower the predicted risk" width="49%">
+  <img src="homecredit-eda/presentation_results/persona_denied_drivers.png" alt="SHAP contributions for the denied persona: outside credit scores, loan-to-value, and loan size raise the predicted risk" width="49%">
+</p>
+
+Under a rule that denies the riskiest 10% of applicants (predicted risk of 17.9% or higher), I used SHAP values to break two holdout predictions into the factors that pushed risk up (red) or down (blue):
+
+- **Approved (predicted risk 3.6%, repaid):** this applicant has *no* credit bureau record but is approved anyway. Strong external scores, university education, and a loan equal to the price of the goods lowered the risk.
+- **Denied (predicted risk 60.7%, had payment difficulties):** this applicant *has* a credit history but is denied anyway. Very low external scores and a loan 42% larger than the price of the goods raised the risk.
+
+Together they show that the model does more than apply "no history, no loan." Both applicants keep the same decision under a stricter rule that denies only the riskiest 5%.
+
+**Selection and fairness caveats:**
+- I picked these two from filtered candidate lists, based partly on their actual outcomes, because they tell a clear story. They are **illustrative, not representative**.
+- **Gender and age contributed to both explanations.** Gender raised the denied applicant's predicted risk and lowered the approved applicant's, and both charts show it. Gender and age are protected characteristics in many lending contexts, so this needs a formal fairness review before any real use.
+- The explanations describe what the score is *associated with*, not what causes default.
+
+## Limitations and Responsible Use
+
+- **Target-informed feature choices.** Some EDA-based choices, such as missing-value flags and band cutoffs, used the outcome on the full training data before cross-validation, including the holdout rows. CV and holdout scores may therefore be slightly optimistic. The Kaggle scores, whose outcomes were never seen, are close to the holdout, which suggests the effect is small.
+- **Fairness was not analyzed.** Age and gender are among the influential predictors, and no bias or compliance testing was done.
+- **Dependence on external scores.** About two-thirds of the model's gain comes from scores whose derivation is undocumented, which makes declined applications harder to explain. My EDA recommended a second model without these scores to measure that trade-off. It was not built.
+- **Reproducibility across software versions.** Re-running the modeling notebook with current package versions selects different hyperparameters and gives a holdout AUC of 0.7496.
+- **Hypothetical policies.** The lending-policy comparisons use historical data with no costs, a simplified benchmark rule, and outcomes only for loans that were actually issued.
+- **Association, not causation.** Feature importance and SHAP values show what the model relies on, not what drives repayment.
+- **Not production-ready.** This model is a decision-support prototype. It should not make automated credit decisions without fairness and legal review, threshold and cost analysis, validation on recent data, and ongoing monitoring.
+
+## Portfolio Notebooks
+
+**To read the finished analysis**, open the PDF report: it opens directly on GitHub and shows all code, tables, charts, and commentary. **To see the code**, open the source notebook.
+
+| Notebook | Objective | Skills demonstrated | Report | Source code |
+|---|---|---|---|---|
+| **1. Exploratory Data Analysis** | Understand the data, find its problems, and identify the strongest relationships with default | Data profiling, missing-value analysis, integrity checks, visualization, business framing | [PDF](reports/eda.pdf) · [HTML](homecredit-eda/eda.html) | [`eda.qmd`](homecredit-eda/eda.qmd) |
+| **2. Predictive Modeling** | Select, tune, and validate a model that ranks applicants by default risk | Cross-validation, algorithm comparison, class imbalance, hyperparameter tuning, holdout validation | [PDF](reports/modeling.pdf) · [HTML](homecredit-eda/modeling.html) | [`modeling.qmd`](homecredit-eda/modeling.qmd) |
+| **3. Business Impact** | Translate model scores into lending-policy outcomes | Risk segmentation, decile analysis, policy simulation, business communication | [PDF](reports/01_business_impact.pdf) · [HTML](homecredit-eda/01_business_impact.html) | [`01_business_impact.Rmd`](homecredit-eda/01_business_impact.Rmd) |
+| **4. Applicant Personas** | Explain individual approve and deny decisions | SHAP interpretability, plain-language explanation, fairness awareness | [PDF](reports/02_personas.pdf) · [HTML](homecredit-eda/02_personas.html) | [`02_personas.Rmd`](homecredit-eda/02_personas.Rmd) |
+
+The data preparation step between notebooks 1 and 2 is [`data_preparation.R`](data_preparation.R), documented in [`docs/data_preparation.md`](docs/data_preparation.md).
+
+GitHub shows `.html` files as source code, so download them to view in a browser. The PDFs are printed from those same HTML files by [`reports/export_pdfs.sh`](reports/export_pdfs.sh), with no code re-run, so they show exactly the recorded results.
+
+## Reproducibility
+
+**Tools:** R (tested with 4.5.2), [Quarto](https://quarto.org/) for the `.qmd` notebooks, and the R packages `tidyverse`, `caret`, `glmnet`, `randomForest`, `xgboost` (3.x), `pROC`, `doParallel`, `rmarkdown`, `knitr`, and `scales`. Exact versions are recorded in [`docs/session_info.txt`](docs/session_info.txt).
+
+**Data:** download these four files from the Kaggle [Home Credit Default Risk](https://www.kaggle.com/c/home-credit-default-risk/data) competition (you must accept the competition rules) and place them in `homecredit-eda/data/`:
+`application_train.csv`, `application_test.csv`, `bureau.csv`, `sample_submission.csv`.
+
+**Run order:**
+
+| Step | Command | Run from | Time |
+|---|---|---|---|
+| 1. EDA | `quarto render eda.qmd` | `homecredit-eda/` | Reads the raw CSVs directly |
+| 2. Prepare data | `Rscript data_preparation.R` | repository root | About 30 seconds |
+| 3. Modeling | `quarto render modeling.qmd` | `homecredit-eda/` | About 10 minutes |
+| 4. Presentation model | `Rscript rebuild_presentation_cache.R` | `homecredit-eda/` | About 2 minutes |
+| 5. Business impact and personas | `Rscript -e 'rmarkdown::render("01_business_impact.Rmd")'`, then the same for `02_personas.Rmd` | `homecredit-eda/` | Seconds each |
+
+**Package versions matter.** All random seeds are fixed, but the published results won't necessarily reproduce exactly under current package versions:
+- The committed [`modeling.html`](homecredit-eda/modeling.html) is the record of the original run (holdout AUC 0.7556).
+- Re-running step 3 with xgboost 3.2.1.1 and caret 7.0.1 selects different hyperparameters (holdout AUC 0.7496).
+- Step 4 avoids this by refitting with the original hyperparameters (holdout AUC 0.7550).
+
+**Not in this repository** (git-ignored):
+- the raw Kaggle data and prepared `.rds` files;
+- the final model, `models/`, about 650 MB;
+- the presentation cache, `presentation_cache/`, about 56 MB;
+- the Kaggle submission file, `submissions/`;
+- the generated CSV tables.
+
+Detailed technical notes are in [`docs/data_preparation.md`](docs/data_preparation.md): every transformation and the EDA finding behind it, train/test consistency checks, and run notes for the modeling and presentation notebooks.
+
+## Skills Demonstrated
+
+| Area | Skills |
+|---|---|
+| Programming and data | R, tidyverse data manipulation, joining and aggregating a 1.7-million-row supplementary table |
+| Analysis | Exploratory data analysis, missing-value analysis, data integrity checks, feature engineering |
+| Machine learning | XGBoost, regularized logistic regression, random forest, cross-validation, hyperparameter tuning, class imbalance |
+| Evaluation and interpretation | ROC AUC, holdout validation, decile and lift analysis, SHAP explanations |
+| Communication | Data visualization, translating model output into lending-policy outcomes, documenting limitations |
+| Reproducibility | Quarto and R Markdown notebooks, documented pipeline, fixed seeds, Git and GitHub |
+
+## Interview Talking Points
+
+1. **Why accuracy is misleading here.** A model can be 91.93% accurate by predicting that no one defaults. I chose ROC AUC because the business needs a *ranking* of applicants.
+2. **Treating a data error as a signal.** The 365,243-day employment value looked like bad data but marked pensioners, a lower-risk group. Recoding it as a category kept that information.
+3. **Reporting what didn't work.** Income, the textbook affordability measure, had essentially no relationship with default (correlation −0.004). I reported it as a failed hypothesis instead of dressing it up.
+4. **An experiment that changed my plan.** Class weighting and downsampling are standard fixes for rare outcomes, but both lowered AUC here, so I kept the simpler model.
+5. **Finding the weak spots in my own evaluation.** I identified where outcome information leaked into feature choices and used the Kaggle scores, whose outcomes the model never saw, as an independent check.
+6. **Handling a reproducibility problem.** When newer package versions changed the tuning result (0.7556 to 0.7496), I refit with the original settings and documented all three numbers instead of quietly replacing one.
+7. **Performance vs. explainability vs. fairness.** The strongest predictors are opaque external scores, and gender and age appear in individual explanations. I can explain why that blocks automated use and what review it would need.
+
+## AI Assistance
+
+I used Claude (Anthropic) as an assistant throughout this project. The analytical questions, decisions, and interpretations are mine, and every reported number comes from code in this repository.
+
+- **EDA:** I followed a stage-gated workflow, writing the question list myself and having Claude compute expected results independently as a cross-check. I overrode its framing where the evidence didn't support it. See the [EDA notebook's AI appendix](homecredit-eda/eda.qmd).
+- **Data preparation:** I wrote the script with Claude, using my EDA decision table as the specification. I verified it against the consistency checks and the EDA's default rates. See [details](docs/data_preparation.md#use-of-ai-in-this-script).
+- **Presentation notebooks:** I used Claude Code to render the notebooks, shortlist personas, and package the results. The prompts are archived in [`docs/process/`](docs/process/).
+- **Documentation:** this README and the supporting docs were reorganized with Claude Code. Several commits are co-authored by Claude.
+
+## Repository Structure
 
 ```
-Rscript rebuild_presentation_cache.R                       # about 2 minutes; writes presentation_cache/
-Rscript -e 'rmarkdown::render("01_business_impact.Rmd")'
-Rscript -e 'rmarkdown::render("02_personas.Rmd")'
+home-credit-project/
+├── README.md
+├── data_preparation.R              # Stage 2: cleaning and feature engineering
+├── homecredit-eda/
+│   ├── eda.qmd / eda.html          # Stage 1: exploratory data analysis
+│   ├── modeling.qmd / .html        # Stage 3: predictive modeling
+│   ├── 01_business_impact.Rmd / .html
+│   ├── 02_personas.Rmd / .html     # Stage 4: business impact and interpretation
+│   ├── presentation_setup.R        # Shared setup for the Stage 4 notebooks
+│   ├── rebuild_presentation_cache.R
+│   ├── presentation_results/       # Charts and summaries produced by Stage 4
+│   └── data/                       # Kaggle data (git-ignored)
+├── reports/                        # PDF reports of all four notebooks
+└── docs/
+    ├── data_preparation.md         # Detailed technical documentation
+    └── process/                    # Archived working notes
 ```
-
-- **Cache:** `presentation_setup.R` loads the model, holdout, and predictions from `presentation_cache/model_objects.rds` (git-ignored, about 650 MB), so each notebook renders in seconds. Build the cache with `rebuild_presentation_cache.R` before rendering. If no cache exists, `presentation_setup.R` falls back to running all of `modeling.qmd`, which fails inside a render (both files have a chunk named `setup`) and uses whatever hyperparameters the search selects.
-- **Choosing personas:** change `approved_pick` or `denied_pick` in the `pick` chunk of `02_personas.Rmd` to use a different candidate row, or `deny_share` in the `rule` chunk to try another decision rule.
-- **Outputs:** both notebooks write to `presentation_results/`. The CSV tables there are git-ignored by the `*.csv` rule and regenerate on every render.
