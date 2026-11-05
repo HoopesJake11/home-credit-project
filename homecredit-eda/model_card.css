@@ -1,0 +1,77 @@
+/* Model card: restrained business-report styling */
+:root {
+  --mc-ink: #1f2933;
+  --mc-muted: #52514e;
+  --mc-accent: #1c5cab;
+  --mc-rule: #e4e2dc;
+  --mc-surface: #fcfcfb;
+  --mc-band: #f4f3ef;
+}
+
+body {
+  color: var(--mc-ink);
+  background: var(--mc-surface);
+  font-size: 15.5px;
+  line-height: 1.6;
+}
+
+h1, h2, h3 { color: var(--mc-accent); font-weight: 600; }
+h1.title { color: var(--mc-ink); font-size: 2rem; }
+.subtitle { color: var(--mc-muted); font-weight: 400; }
+#title-block-header { border-bottom: 2px solid var(--mc-accent); padding-bottom: 0.6rem; margin-bottom: 1.4rem; }
+section.level1 { margin-top: 2.6rem; padding-top: 0.4rem; border-top: 1px solid var(--mc-rule); }
+section.level1:first-of-type { border-top: none; }
+
+.mc-banner {
+  background: #fff4e5;
+  border-left: 5px solid #c96a00;
+  padding: 0.8rem 1.1rem;
+  margin: 0.5rem 0 1.6rem;
+  border-radius: 4px;
+}
+
+.mc-formula {
+  text-align: center;
+  font-size: 1.15rem;
+  background: var(--mc-band);
+  border-radius: 4px;
+  padding: 0.7rem 1rem;
+  margin: 0.8rem auto 1.2rem;
+  max-width: 34rem;
+}
+
+/* Tables */
+table.mc-table, .table {
+  font-size: 0.86rem;
+  margin: 0.4rem 0 1.4rem;
+  width: 100%;
+}
+table.mc-table thead th {
+  background: var(--mc-band);
+  color: var(--mc-ink);
+  font-weight: 600;
+  border-bottom: 2px solid var(--mc-rule);
+  vertical-align: bottom;
+}
+table.mc-table td { vertical-align: top; border-top: 1px solid var(--mc-rule); }
+table.mc-table tbody tr:nth-child(even) { background: #faf9f6; }
+caption, .table-caption, .quarto-float-caption { color: var(--mc-muted); font-weight: 600; text-align: left; }
+code { color: #8a3b12; background: #f6f1ea; font-size: 0.85em; }
+
+/* Figures */
+.quarto-figure img { border: 1px solid var(--mc-rule); border-radius: 4px; background: #fff; }
+.figure-caption, figcaption { color: var(--mc-muted); font-size: 0.88rem; }
+
+/* Risk ratings */
+.risk-critical, .risk-high, .risk-medium, .risk-low {
+  display: inline-block; padding: 0.1rem 0.5rem; border-radius: 3px; font-weight: 600; font-size: 0.8rem; white-space: nowrap;
+}
+.risk-critical { background: #fbe3e3; color: #8f1d1d; }
+.risk-high     { background: #fdeedd; color: #8a4500; }
+.risk-medium   { background: #fff7d6; color: #6b5300; }
+.risk-low      { background: #e6f2e6; color: #1f5e1f; }
+
+@media print {
+  section.level1 { page-break-before: auto; }
+  .mc-banner { break-inside: avoid; }
+}
