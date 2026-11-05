@@ -239,8 +239,10 @@ cat(summary_lines, sep = "\n")
 - **No costs.** Defaults avoided are counted, not valued. Lost revenue from declined
   good borrowers, loan sizes, and pricing are not modeled, so no financial savings
   are claimed.
-- **Fairness not assessed.** Age and gender are among the model's influential
-  predictors (see `modeling.qmd` and `02_personas.Rmd`). Any real policy would need a
-  fairness and compliance review first.
+- **Fairness not assessed here.** Age and gender are among the model's influential
+  predictors (see `modeling.qmd` and `02_personas.Rmd`). The project's model card
+  (`model_card.qmd`) assesses fairness separately, at its own 0.25 threshold. It finds
+  approval gaps by gender and education, and direct use of gender, marital status, and
+  age that would block real-world use.
 - **Association, not causation.** The model ranks applicants by characteristics
   associated with default; it does not identify causes.

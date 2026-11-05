@@ -871,10 +871,13 @@ rejected applicants would have performed.</li>
 <li><strong>No costs.</strong> Defaults avoided are counted, not valued.
 Lost revenue from declined good borrowers, loan sizes, and pricing are
 not modeled, so no financial savings are claimed.</li>
-<li><strong>Fairness not assessed.</strong> Age and gender are among the
-model’s influential predictors (see <code>modeling.qmd</code> and
-<code>02_personas.Rmd</code>). Any real policy would need a fairness and
-compliance review first.</li>
+<li><strong>Fairness not assessed here.</strong> Age and gender are
+among the model’s influential predictors (see <code>modeling.qmd</code>
+and <code>02_personas.Rmd</code>). The project’s model card
+(<code>model_card.qmd</code>) assesses fairness separately, at its own
+0.25 threshold. It finds approval gaps by gender and education, and
+direct use of gender, marital status, and age that would block
+real-world use.</li>
 <li><strong>Association, not causation.</strong> The model ranks
 applicants by characteristics associated with default; it does not
 identify causes.</li>
