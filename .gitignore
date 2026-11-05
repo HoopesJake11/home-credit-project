@@ -16,3 +16,6 @@ submissions/
 .Rproj.user/
 *_files/
 .quarto/
+
+# macOS
+.DS_Store
