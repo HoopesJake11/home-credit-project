@@ -44,6 +44,20 @@ Home Credit lends to people traditional banks turn away, and has done so since 1
 8. Does default risk change smoothly with age and employment tenure, or are there breaks that argue for binning?
 9. Do recent credit bureau inquiries relate to default, and over what lookback window?
 
+## Key Findings at a Glance
+
+The full evidence is in the sections below, and the [Results and Conclusions](#results-and-conclusions) section collects every decision. In brief:
+
+- **Default is rare.** Only 8.07% of applicants had payment difficulties, so accuracy is a misleading metric and ROC AUC is used instead.
+- **External credit scores carry the strongest signal.** Default runs from 3.2% to 20.0% across `EXT_SOURCE_3` deciles, but `EXT_SOURCE_1` is missing for 56.4% of applicants and none of the scores has a documented derivation.
+- **No credit history means higher risk.** The 14.3% of applicants with no bureau record default at 10.12%, against 7.73% for those with a history. The depth of history is U-shaped rather than linear.
+- **Missing information is itself predictive.** Applicants who left 51 or more fields blank default at 11.2%, against 6.1% for complete records.
+- **One "impossible" value is a category.** `DAYS_EMPLOYED = 365243` marks pensioners, who default less often than everyone else.
+- **Affordability barely registers.** Reported income correlates with default at -0.004, and payment-to-income is nearly as weak.
+- **Age is a strong predictor and a protected characteristic.** It needs a fairness review before it is used in any model.
+
+These are associations in historical data, not causes of default.
+
 # Description of the Data
 
 ```{r}
@@ -179,6 +193,7 @@ nrow(missing_by_col)
 
 ```{r}
 #| fig-height: 5
+#| fig-width: 8
 
 # Plot the 15 worst offenders. fct_reorder sorts the bars by size rather than
 # alphabetically, which is what makes a horizontal bar chart readable.
@@ -190,7 +205,9 @@ missing_by_col |>
                      expand = expansion(mult = c(0, 0.05))) +
   labs(title = "Fifteen columns are missing for roughly two thirds of applicants",
        subtitle = "67 of 122 columns contain at least one missing value",
-       x = "Share of rows missing", y = NULL)
+       x = "Share of rows missing", y = NULL) +
+  # Align the title with the whole plot so the long column labels don't push it off the edge.
+  theme(plot.title.position = "plot")
 ```
 
 ```{r}
@@ -759,8 +776,8 @@ Ranked by the spread between the safest and riskiest group:
 | Age band | 4.9% | 12.3% | 2.5x |
 | Employment tenure | 5.2% | 11.0% | 2.1x |
 | Education level | 5.4% | 10.9% | 2.0x |
-| Count of missing fields | 6.1% | 11.2% | 1.8x |
 | Housing type | 6.6% | 12.3% | 1.9x |
+| Count of missing fields | 6.1% | 11.2% | 1.8x |
 | Bureau record present | 7.7% | 10.1% | 1.3x |
 
 And the ones that did not work: payment-to-income moved default rate only from 7.1% to 8.9% and then fell back in the top decile. Raw income correlates with the target at -0.004. Bureau enquiry counts are near zero across all six windows and the one-month version runs backwards.

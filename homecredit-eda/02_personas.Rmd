@@ -11,10 +11,25 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 source("presentation_setup.R")
 ```
 
-The two personas on the slides are based on real, anonymized holdout applicants,
-scored by the final model. The names are made up. Each applicant's prediction is
-split into contributions (SHAP values) that show which parts of the application
-pushed the risk up or down.
+**Purpose.** This notebook explains *why* the model scores an applicant the way it
+does, using two real, anonymized holdout applicants: one approved and one denied.
+Each prediction is split into contributions (SHAP values) that show which parts
+of the application pushed the predicted risk up or down. Any names used for the
+personas on the presentation slides are made up.
+
+**These two applicants are intentionally selected illustrative examples, not a
+representative sample.** I filtered the holdout to candidates who fit a clear story
+(including on their *actual* outcome) and then picked one of each by hand. They
+show how the model reasons about individual cases; they say nothing about how
+often the model is right or how typical these drivers are.
+
+**Model.** The scores come from the same refit of the final XGBoost model used in
+`01_business_impact.Rmd` (holdout AUC 0.7550; the original run scored 0.7556).
+
+**Association, not causation.** A SHAP contribution shows how much a feature moved
+*this model's* score, given everything else in the application. It does not show
+that the characteristic causes default, or that changing it would change the
+applicant's real risk.
 
 **Decision rule used for the personas:** the riskiest 10% of applicants by model
 score are denied; everyone else is approved. Change `deny_share` to try another rule.
@@ -27,6 +42,7 @@ ho <- holdout_data |>
   mutate(row_id = row_number(),
          prob = holdout_prob,
          risk_percentile = percent_rank(prob),
+         risk_rank = min_rank(desc(prob)),   # 1 = riskiest applicant in the holdout
          decision = if_else(prob >= cutoff, "Deny", "Approve"))
 
 tibble(`Deny if predicted risk is at least` = pct(cutoff),
@@ -35,6 +51,10 @@ tibble(`Deny if predicted risk is at least` = pct(cutoff),
 ```
 
 ## Candidate applicants
+
+The filters below were chosen to produce clear, easy-to-explain examples. Because
+they use the applicant's actual outcome, the candidates are a hand-picked subset by
+design.
 
 **Approved candidate:** no credit bureau record (the borrower a traditional bank turns
 away), repaid, in the safest half of applicants, has at least two outside scores, aged
@@ -121,6 +141,10 @@ write_csv(by_theme,   file.path(results_dir, "persona_drivers_by_theme.csv"))
 write_csv(by_feature, file.path(results_dir, "persona_drivers_by_feature.csv"))
 ```
 
+The charts below group the contributions into plain-English themes. Red bars
+pushed the predicted risk up; blue bars pushed it down. Contributions are on the
+log-odds scale, so they add up to the applicant's score.
+
 ```{r persona-charts, fig.width = 10, fig.height = 5}
 for (p in c("Approved", "Denied")) {
   d <- by_theme |> filter(persona == p) |> slice_max(abs(contribution), n = 7)
@@ -139,13 +163,41 @@ for (p in c("Approved", "Denied")) {
 }
 ```
 
+## Age and gender in these explanations
+
+Age and gender are protected characteristics in many lending contexts, and both
+appear in these explanations.
+
+```{r protected}
+protected <- contrib |>
+  filter(theme %in% c("Gender", "Age")) |>
+  group_by(persona, theme) |>
+  summarise(contribution = sum(contribution), .groups = "drop") |>
+  mutate(direction = if_else(contribution > 0, "raises risk", "lowers risk"))
+
+protected |>
+  mutate(contribution = round(contribution, 3)) |>
+  knitr::kable(caption = "Gender and age contributions (log-odds; positive = riskier)")
+
+pc <- function(p, t) protected$contribution[protected$persona == p & protected$theme == t]
+```
+
+Gender moved the denied applicant's score up by `r round(pc("Denied", "Gender"), 2)`
+and the approved applicant's down by `r round(abs(pc("Approved", "Gender")), 2)`
+(log-odds). Age moved them by `r round(pc("Denied", "Age"), 2)` and
+`r round(pc("Approved", "Age"), 2)`. These are small next to the outside credit
+scores and are not what drives either decision. But a model that
+scores applicants partly on gender and age would need a formal fairness and
+compliance review before any real use, including whether these features should be
+removed.
+
 ## Summary for the slides
 
 ```{r summary}
 avg_risk <- mean(ho$prob)
 fmt_profile <- function(r) {
-  c(sprintf("- Predicted risk: %s (average applicant %s); riskier than %s of applicants; decision: %s",
-            pct(r$prob), pct(avg_risk), pct(r$risk_percentile), r$decision),
+  c(sprintf("- Predicted risk: %s (average applicant %s); risk rank %s of %s (1 = riskiest); decision: %s",
+            pct(r$prob), pct(avg_risk), num(r$risk_rank), num(nrow(ho)), r$decision),
     sprintf("- Actual outcome: %s", if_else(r$TARGET == 1, "had payment difficulties", "repaid")),
     sprintf("- Age %d, %s, %s; employed %s years; %s",
             round(r$age_years), r$CODE_GENDER, r$NAME_FAMILY_STATUS,
@@ -161,7 +213,16 @@ fmt_profile <- function(r) {
 }
 lines <- c("# Persona results", "",
            sprintf("Rule: deny the riskiest %s (predicted risk at least %s).",
-                   pct(deny_share, 0), pct(cutoff)), "")
+                   pct(deny_share, 0), pct(cutoff)),
+           "",
+           "These two applicants were intentionally selected as illustrative examples, not a representative sample.",
+           "Contributions are log-odds SHAP values: they show what the model's score is associated with, not what causes default.",
+           "")
+# One bullet per theme, or a single "none" line when no theme moved risk that way.
+driver_lines <- function(d) {
+  if (nrow(d) == 0) return("  - None: no theme moved the predicted risk in this direction")
+  paste0("  - ", d$theme, " (", round(d$contribution, 2), ")")
+}
 for (i in seq_len(nrow(personas))) {
   r <- personas[i, ]
   th <- by_theme |> filter(persona == r$persona)
@@ -170,9 +231,11 @@ for (i in seq_len(nrow(personas))) {
   lines <- c(lines, paste0("## ", r$persona, " persona (holdout row ", r$row_id, ")"),
              fmt_profile(r),
              "- Biggest factors lowering risk:",
-             paste0("  - ", lower$theme, " (", round(lower$contribution, 2), ")"),
+             driver_lines(lower),
              "- Biggest factors raising risk:",
-             paste0("  - ", raise$theme, " (", round(raise$contribution, 2), ")"),
+             driver_lines(raise),
+             sprintf("- Protected characteristics: gender %+.2f, age %+.2f (log-odds)",
+                     pc(r$persona, "Gender"), pc(r$persona, "Age")),
              "")
 }
 writeLines(lines, file.path(results_dir, "persona_summary.md"))

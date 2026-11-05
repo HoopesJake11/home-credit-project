@@ -11,11 +11,23 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 source("presentation_setup.R")
 ```
 
-This notebook turns the final model's holdout predictions into the numbers on the
-Business Impact slide. It uses the 61,502 holdout applicants the model never saw
-in training, so nothing here is in-sample. It follows the success definition in
-the business problem statement: a lower default rate at the same approval rate,
-or a higher approval rate at the same default rate.
+**Purpose.** This notebook asks what the model's scores would mean for an actual
+lending decision. It turns the final model's holdout predictions into default
+rates by risk group, the effect of flagging the riskiest applicants, and a
+comparison with a simple "no credit history, no loan" rule. It follows the success
+definition in the business problem statement: a lower default rate at the same
+approval rate, or a higher approval rate at the same default rate.
+
+**Data and model.** Everything here uses the 61,502 holdout applicants the model
+never saw in training, so nothing is in-sample. The model is a refit of the final
+XGBoost model from `modeling.qmd` with the same hyperparameters, built by
+`rebuild_presentation_cache.R`. Its holdout AUC is 0.7550, against 0.7556 in the
+original run; the small gap comes from package-version differences.
+
+**How to read the results.** Every policy below is a *retrospective* comparison on
+historical applicants whose outcomes are already known. These are illustrations of
+what the ranking could support, not measured results of a deployed policy. No
+costs, revenue, or loan pricing are included.
 
 ```{r basics}
 ho <- tibble(
@@ -35,6 +47,10 @@ tibble(Item  = c("Holdout applicants", "Defaults", "Default rate", "Holdout AUC"
 ```
 
 ## 1. Default rate by model risk decile
+
+Applicants are ranked by predicted risk and split into ten equal groups
+(deciles). If the model ranks well, the default rate should rise steadily from
+decile 1 (safest) to decile 10 (riskiest).
 
 ```{r deciles}
 ho <- ho |> mutate(decile = ntile(prob, 10))   # 10 = riskiest
@@ -58,7 +74,7 @@ deciles |>
 write_csv(deciles, file.path(results_dir, "deciles.csv"))
 ```
 
-```{r decile-chart, fig.width = 9, fig.height = 5}
+```{r decile-chart, fig.width = 11, fig.height = 6, fig.cap = "Default rate by model risk decile on the 61,502 holdout applicants. The safest and riskiest deciles are highlighted."}
 decile_plot <- ggplot(deciles, aes(factor(decile), default_rate,
                                    fill = decile %in% c(1, 10))) +
   geom_col() +
@@ -72,7 +88,19 @@ decile_plot
 ggsave(file.path(results_dir, "decile_chart.png"), decile_plot, width = 11, height = 6, dpi = 200)
 ```
 
+**Interpretation.** The default rate rises at every step, from
+`r pct(deciles$default_rate[deciles$decile == 1])` in the safest decile to
+`r pct(deciles$default_rate[deciles$decile == 10])` in the riskiest, and the riskiest
+decile alone holds `r pct(deciles$share_of_defaults[deciles$decile == 10])` of all
+defaults. A ranking this steep is what makes risk-based review possible: most of
+the risk sits in a small, identifiable group.
+
 ## 2. Flagging the riskiest applicants
+
+Each row below flags the riskiest 5%, 10%, 15%, or 20% of holdout applicants and
+shows what happens to the default rate among everyone else. "Flagged" could mean
+declined, referred to an underwriter, or asked for more verification; the table
+does not assume which.
 
 ```{r policies}
 flag_policy <- function(q) {
@@ -101,10 +129,27 @@ policies |>
 write_csv(policies, file.path(results_dir, "policies.csv"))
 ```
 
+**Interpretation.** Flagging more applicants catches more defaults but also flags
+more applicants who would have repaid (`good_borrowers_flagged`). Choosing where to
+draw the line is a business decision that needs Home Credit's own costs and risk
+appetite. This notebook shows the trade-off; it does not pick a cutoff.
+
 ## 3. Same approval rate: the model vs. "no credit history, no loan"
 
 A traditional lender turns away anyone without a credit bureau record. This
-compares that rule with the model turning away the same number of applicants.
+compares that rule with the model turning away the same number of applicants,
+namely the ones it rates riskiest.
+
+**Which applicants count as "no credit history".** The rule here declines every
+applicant with **no credit bureau record** (`has_bureau_record == 0`), which is
+14.3% of the training data. This is a broader group than the `thin_file` feature in
+`data_preparation.R`, which flags applicants with no bureau record *and* no credit
+inquiry data. The `thin_file` feature is not used in this comparison.
+
+**What kind of comparison this is.** It is retrospective: both policies are
+applied to historical holdout applicants whose outcomes are already known. The
+"no credit history, no loan" rule is a simplified benchmark, not Home Credit's
+actual policy, and outcomes exist only for loans that were actually issued.
 
 ```{r rule-vs-model}
 rule_decline  <- ho$has_bureau == 0
@@ -118,11 +163,14 @@ same_approval <- tibble(
                                            mean(ho$default[!model_decline])), 2),
   `Defaults per 10,000 applicants` = num(c(sum(ho$default[!rule_decline]),
                                            sum(ho$default[!model_decline])) * per_10k),
-  `Thin-file applicants approved` = pct(c(0, mean(!model_decline[ho$has_bureau == 0])))
+  `No-bureau-record applicants approved` = pct(c(0, mean(!model_decline[ho$has_bureau == 0])))
 )
 knitr::kable(same_approval)
 
 # Same default rate as the rule: how many applicants can the model approve?
+# Note: this cutoff is found by searching the holdout's own outcomes for the
+# largest approval count that keeps the default rate at or below the rule's, so
+# the result is optimistic (see the note after the tables).
 rule_rate  <- mean(ho$default[!rule_decline])
 safe_first <- ho$default[order(ho$prob)]
 approve_n  <- max(which(cumsum(safe_first) / seq_len(n_ho) <= rule_rate))
@@ -137,6 +185,18 @@ knitr::kable(same_default)
 write_csv(same_approval, file.path(results_dir, "same_approval.csv"))
 write_csv(same_default,  file.path(results_dir, "same_default.csv"))
 ```
+
+**Interpretation.** At the same approval rate, the model-based policy approves
+loans with a lower default rate than the rule, and it still approves most of the
+applicants with no bureau record whom the rule turns away entirely. This is the
+more defensible of the two comparisons: the model only has to choose *which*
+applicants to decline, and the number declined is fixed by the rule.
+
+**Caution on the same-default-rate comparison.** The second table should not be
+used as a headline result. Its cutoff was chosen *using the holdout outcomes*, by
+searching for the largest number of approvals that keeps the observed default rate
+at or below the rule's. A cutoff tuned on the same data it is evaluated on
+overstates how well it would hold up on new applicants.
 
 ## 4. Summary for the slides
 
@@ -157,12 +217,30 @@ summary_lines <- c(
   sprintf("- Same approval rate as 'no credit history, no loan' (%s approved): default rate %s (rule) vs %s (model); %s fewer defaults per 10,000 applicants",
           pct(1 - k / n_ho), pct(rule_rate, 2),
           pct(mean(ho$default[!model_decline]), 2), num(fewer)),
-  sprintf("- Thin-file applicants the model approves at that rate: %s",
+  sprintf("- Applicants with no credit bureau record the model approves at that rate: %s",
           pct(mean(!model_decline[ho$has_bureau == 0]))),
-  sprintf("- Same default rate as the rule (%s): model approves %s vs %s (%s more per 10,000 applicants)",
+  sprintf("- Same default rate as the rule (%s): model approves %s vs %s (%s more per 10,000 applicants); cutoff chosen using holdout outcomes, so optimistic",
           pct(rule_rate, 2), pct(approve_n / n_ho), pct(1 - k / n_ho),
-          num((approve_n - (n_ho - k)) * per_10k))
+          num((approve_n - (n_ho - k)) * per_10k)),
+  "",
+  "All comparisons are retrospective, on historical holdout applicants, with no costs included."
 )
 writeLines(summary_lines, file.path(results_dir, "business_impact_summary.md"))
 cat(summary_lines, sep = "\n")
 ```
+
+## 5. Limitations
+
+- **Retrospective, not prospective.** Every policy is applied to historical applicants
+  with known outcomes. A deployed policy would face new applicants and changing
+  conditions.
+- **Issued loans only.** Outcomes exist only for loans Home Credit actually issued, so
+  this analysis cannot show how previously rejected applicants would have performed.
+- **No costs.** Defaults avoided are counted, not valued. Lost revenue from declined
+  good borrowers, loan sizes, and pricing are not modeled, so no financial savings
+  are claimed.
+- **Fairness not assessed.** Age and gender are among the model's influential
+  predictors (see `modeling.qmd` and `02_personas.Rmd`). Any real policy would need a
+  fairness and compliance review first.
+- **Association, not causation.** The model ranks applicants by characteristics
+  associated with default; it does not identify causes.
